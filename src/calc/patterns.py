@@ -31,6 +31,7 @@ class PatternType(str, Enum):
     DISTRIBUTION = "DISTRIBUTION"
     MOMENTUM_EXHAUSTION = "MOMENTUM_EXHAUSTION"
     SQUEEZE_IGNITION = "SQUEEZE_IGNITION"
+    SMART_MONEY_DIVERGENCE = "SMART_MONEY_DIVERGENCE"
 
 
 @dataclass
@@ -156,6 +157,11 @@ class PatternDetector:
         
         # 11. Momentum Exhaustion (NEW)
         p = self._detect_momentum_exhaustion(indicators, pair_data)
+        if p:
+            patterns.append(p)
+        
+        # 12. Smart Money Divergence (NEW: FAS V2)
+        p = self._detect_smart_money_divergence(indicators)
         if p:
             patterns.append(p)
         
@@ -536,6 +542,53 @@ class PatternDetector:
             }
         )
 
+    def _detect_smart_money_divergence(self, indicators) -> Optional[Pattern]:
+        """
+        Detect Smart Money Divergence (FAS V2 parity):
+        - OI increasing (+3%) while price decreasing (-1%) → shorts accumulating
+        - OI decreasing (-3%) while price increasing (+1%) → longs closing
+        """
+        if indicators.oi_delta_pct is None or indicators.price_change_pct is None:
+            return None
+        
+        oi_delta = indicators.oi_delta_pct
+        price_change = indicators.price_change_pct
+        
+        # OI up, price down → Smart money shorts accumulating
+        if oi_delta > 3.0 and price_change < -1.0:
+            score = 40.0  # Bearish signal
+            direction = 'SHORT'
+            confidence = min(90, 70 + abs(oi_delta) + abs(price_change))
+            
+            return Pattern(
+                pattern_type=PatternType.SMART_MONEY_DIVERGENCE,
+                score=-score,  # Negative for SHORT
+                confidence=confidence,
+                details={
+                    'oi_delta_pct': oi_delta,
+                    'price_change_pct': price_change,
+                    'direction': direction,
+                }
+            )
+        
+        # OI down, price up → Smart money longs closing
+        if oi_delta < -3.0 and price_change > 1.0:
+            score = 40.0  # Bullish reversal signal
+            direction = 'LONG'
+            confidence = min(90, 70 + abs(oi_delta) + abs(price_change))
+            
+            return Pattern(
+                pattern_type=PatternType.SMART_MONEY_DIVERGENCE,
+                score=score,  # Positive for LONG
+                confidence=confidence,
+                details={
+                    'oi_delta_pct': oi_delta,
+                    'price_change_pct': price_change,
+                    'direction': direction,
+                }
+            )
+        
+        return None
 
 def calculate_total_score(patterns: List[Pattern]) -> tuple[float, str, float]:
     """

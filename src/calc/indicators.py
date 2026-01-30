@@ -17,10 +17,8 @@ class IndicatorResult:
     macd_line: Optional[float] = None
     macd_signal: Optional[float] = None
     macd_histogram: Optional[float] = None
-    atr: Optional[float] = None
     volume_zscore: Optional[float] = None
     price_change_pct: Optional[float] = None
-    buy_ratio: Optional[float] = None
     normalized_imbalance: Optional[float] = None
     # New fields for FAS V2 parity
     cvd_cumulative: Optional[float] = None
@@ -153,40 +151,6 @@ def calculate_macd(
     return (macd_value, signal_value, histogram)
 
 
-def calculate_atr(
-    highs: np.ndarray,
-    lows: np.ndarray,
-    closes: np.ndarray,
-    period: int = 14,
-) -> Optional[float]:
-    """
-    Calculate Average True Range.
-    
-    Args:
-        highs: Array of high prices
-        lows: Array of low prices
-        closes: Array of close prices
-        period: ATR period
-    
-    Returns:
-        ATR value
-    """
-    if len(closes) < period + 1:
-        return None
-    
-    # True Range components
-    high_low = highs[1:] - lows[1:]
-    high_close = np.abs(highs[1:] - closes[:-1])
-    low_close = np.abs(lows[1:] - closes[:-1])
-    
-    # True Range = max of the three
-    tr = np.maximum(high_low, np.maximum(high_close, low_close))
-    
-    # ATR = EMA of True Range
-    atr = calculate_ema(tr, period)
-    
-    return float(atr[-1]) if not np.isnan(atr[-1]) else None
-
 
 def calculate_volume_zscore(
     volumes: np.ndarray,
@@ -232,12 +196,6 @@ def calculate_price_change(
     return float((current - prev) / prev * 100)
 
 
-def calculate_buy_ratio(volume: float, buy_volume: float) -> Optional[float]:
-    """Calculate buy/sell ratio"""
-    if volume == 0:
-        return 0.5
-    return buy_volume / volume
-
 
 def calculate_normalized_imbalance(volume: float, buy_volume: float) -> Optional[float]:
     """
@@ -267,7 +225,6 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
     if agg is None:
         return result
     
-    result.buy_ratio = calculate_buy_ratio(agg['volume'], agg['buy_volume'])
     result.normalized_imbalance = calculate_normalized_imbalance(agg['volume'], agg['buy_volume'])
     
     # CVD and Smoothed Imbalance from PairData (updated on each candle)
@@ -312,15 +269,6 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
     volumes = pair_data.get_volumes(20)
     if len(volumes) >= 20:
         result.volume_zscore = calculate_volume_zscore(volumes)
-    
-    # ATR (need OHLC data)
-    candles = pair_data.get_last_n_candles(15)
-    if len(candles) >= 15:
-        result.atr = calculate_atr(
-            candles['high'],
-            candles['low'],
-            candles['close'],
-        )
     
     return result
 

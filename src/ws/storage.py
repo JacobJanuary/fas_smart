@@ -65,8 +65,9 @@ class PairData:
     # CVD and Imbalance tracking (for FAS V2 parity)
     cvd_cumulative: float = 0.0           # Running CVD sum
     prev_cvd_cumulative: float = 0.0      # For delta comparison
-    smoothed_imbalance: float = 0.0       # EMA of normalized imbalance
-    smoothed_imbalance_alpha: float = 0.2 # EMA smoothing factor
+    smoothed_imbalance: float = 0.0       # (SMA3 + SMA6) / 2 of normalized imbalance
+    imbalance_history: list = field(default_factory=list)  # Last 6 values for SMA
+
     
     # Previous indicators for crossover detection
     prev_macd_histogram: Optional[float] = None
@@ -93,12 +94,17 @@ class PairData:
             self.prev_cvd_cumulative = self.cvd_cumulative
             self.cvd_cumulative += cvd_delta
             
-            # Update smoothed imbalance (EMA)
+            # Update smoothed imbalance: (SMA3 + SMA6) / 2 (FAS V2 parity)
             norm_imbalance = (2 * buy_volume - volume) / volume
-            self.smoothed_imbalance = (
-                self.smoothed_imbalance_alpha * norm_imbalance + 
-                (1 - self.smoothed_imbalance_alpha) * self.smoothed_imbalance
-            )
+            self.imbalance_history.append(norm_imbalance)
+            if len(self.imbalance_history) > 6:
+                self.imbalance_history.pop(0)
+            
+            # Calculate SMA3 and SMA6
+            if len(self.imbalance_history) >= 3:
+                sma3 = sum(self.imbalance_history[-3:]) / 3
+                sma6 = sum(self.imbalance_history[-6:]) / min(6, len(self.imbalance_history))
+                self.smoothed_imbalance = (sma3 + sma6) / 2
     
     def get_last_n_candles(self, n: int) -> np.ndarray:
         """Get the last N candles in chronological order"""
