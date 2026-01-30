@@ -191,6 +191,9 @@ class FASService:
         
         # Check if we have enough data
         if pair_data.candle_count < config.ROLLING_WINDOW_MINUTES:
+            # Log first pair's progress every cycle
+            if symbol == 'BTCUSDT':
+                logger.debug(f"BTCUSDT waiting: {pair_data.candle_count}/{config.ROLLING_WINDOW_MINUTES} candles")
             return None
         
         # Calculate indicators
@@ -204,6 +207,10 @@ class FASService:
         
         # Calculate total score
         total_score, direction, confidence = calculate_total_score(patterns)
+        
+        # Log patterns for debugging
+        if symbol == 'BTCUSDT':
+            logger.debug(f"BTCUSDT: patterns={len(patterns)}, score={total_score:.1f}, dir={direction}")
         
         # Store current indicators for next iteration
         self._prev_indicators[symbol] = {
