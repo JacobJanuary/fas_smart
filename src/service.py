@@ -16,7 +16,7 @@ from ws.connection import BinanceWSManager, ConnectionConfig
 from ws.handlers import MessageRouter
 from ws.storage import DataStore
 from ws.rest_poller import OpenInterestPoller
-from calc.indicators import calculate_all_indicators
+from calc.indicators import calculate_all_indicators, calculate_indicator_score
 from calc.patterns import PatternDetector, calculate_total_score
 
 logger = logging.getLogger(__name__)
@@ -206,12 +206,26 @@ class FASService:
         # Detect patterns
         patterns = self.pattern_detector.detect_all(indicators, pair_data, prev)
         
-        # Calculate total score
-        total_score, direction, confidence = calculate_total_score(patterns)
+        # Calculate pattern score
+        pattern_score, direction, confidence = calculate_total_score(patterns)
+        
+        # Calculate indicator score (FAS V2 parity)
+        indicator_score = calculate_indicator_score(indicators, pair_data)
+        
+        # Total score = pattern_score + indicator_score (matching FAS V2)
+        total_score = pattern_score + indicator_score
+        
+        # Adjust direction based on total score
+        if total_score > 10:
+            direction = 'LONG'
+        elif total_score < -10:
+            direction = 'SHORT'
+        else:
+            direction = 'NEUTRAL'
         
         # Log patterns for debugging
         if symbol == 'BTCUSDT':
-            logger.debug(f"BTCUSDT: patterns={len(patterns)}, score={total_score:.1f}, dir={direction}")
+            logger.debug(f"BTCUSDT: patterns={len(patterns)}, p_score={pattern_score:.1f}, i_score={indicator_score:.1f}, total={total_score:.1f}")
         
         # Store current indicators for next iteration
         self._prev_indicators[symbol] = {
@@ -219,6 +233,15 @@ class FASService:
             'macd_signal': indicators.macd_signal,
             'rsi': indicators.rsi,
         }
+        
+        # Update pair_data prev values for crossover detection
+        pair_data.prev_macd_histogram = indicators.macd_histogram
+        pair_data.prev_rsi = indicators.rsi
+        pair_data.prev_price_change = indicators.price_change_pct
+        
+        # Update prev OI for next delta calculation
+        if pair_data.latest_open_interest > 0:
+            pair_data.prev_open_interest = pair_data.latest_open_interest
         
         # Only generate signal if score is significant
         if abs(total_score) < 10:

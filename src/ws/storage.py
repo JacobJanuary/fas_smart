@@ -48,6 +48,7 @@ class PairData:
     # Latest funding rate (updated via markPrice stream)
     latest_funding_rate: float = 0.0
     latest_open_interest: float = 0.0  # Updated via REST
+    prev_open_interest: float = 0.0    # For OI delta calculation
     
     # Liquidations accumulator for current minute
     liq_long_current: float = 0.0
@@ -61,18 +62,43 @@ class PairData:
     ema_rsi_gain: Optional[float] = None
     ema_rsi_loss: Optional[float] = None
     
+    # CVD and Imbalance tracking (for FAS V2 parity)
+    cvd_cumulative: float = 0.0           # Running CVD sum
+    prev_cvd_cumulative: float = 0.0      # For delta comparison
+    smoothed_imbalance: float = 0.0       # EMA of normalized imbalance
+    smoothed_imbalance_alpha: float = 0.2 # EMA smoothing factor
+    
+    # Previous indicators for crossover detection
+    prev_macd_histogram: Optional[float] = None
+    prev_rsi: Optional[float] = None
+    prev_price_change: Optional[float] = None
+    
     def __post_init__(self):
         if self.candles is None:
             self.candles = np.zeros(DEFAULT_BUFFER_SIZE, dtype=CANDLE_DTYPE)
     
     def add_candle(self, timestamp: int, o: float, h: float, l: float, 
                    c: float, volume: float, buy_volume: float):
-        """Add a new candle to the ring buffer"""
+        """Add a new candle to the ring buffer and update derived metrics"""
         self.candles[self.write_idx] = (
             timestamp, o, h, l, c, volume, buy_volume, self.latest_funding_rate
         )
         self.write_idx = (self.write_idx + 1) % DEFAULT_BUFFER_SIZE
         self.candle_count = min(self.candle_count + 1, DEFAULT_BUFFER_SIZE)
+        
+        # Update CVD cumulative: buy_volume - sell_volume (in notional terms)
+        # CVD delta = (buy_volume - sell_volume) = 2*buy_volume - total_volume
+        if volume > 0:
+            cvd_delta = (2 * buy_volume - volume) * c  # In notional (USD)
+            self.prev_cvd_cumulative = self.cvd_cumulative
+            self.cvd_cumulative += cvd_delta
+            
+            # Update smoothed imbalance (EMA)
+            norm_imbalance = (2 * buy_volume - volume) / volume
+            self.smoothed_imbalance = (
+                self.smoothed_imbalance_alpha * norm_imbalance + 
+                (1 - self.smoothed_imbalance_alpha) * self.smoothed_imbalance
+            )
     
     def get_last_n_candles(self, n: int) -> np.ndarray:
         """Get the last N candles in chronological order"""

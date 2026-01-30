@@ -22,6 +22,11 @@ class IndicatorResult:
     price_change_pct: Optional[float] = None
     buy_ratio: Optional[float] = None
     normalized_imbalance: Optional[float] = None
+    # New fields for FAS V2 parity
+    cvd_cumulative: Optional[float] = None
+    prev_cvd_cumulative: Optional[float] = None
+    smoothed_imbalance: Optional[float] = None
+    oi_delta_pct: Optional[float] = None
 
 
 def calculate_ema(values: np.ndarray, period: int) -> np.ndarray:
@@ -265,6 +270,18 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
     result.buy_ratio = calculate_buy_ratio(agg['volume'], agg['buy_volume'])
     result.normalized_imbalance = calculate_normalized_imbalance(agg['volume'], agg['buy_volume'])
     
+    # CVD and Smoothed Imbalance from PairData (updated on each candle)
+    result.cvd_cumulative = pair_data.cvd_cumulative
+    result.prev_cvd_cumulative = pair_data.prev_cvd_cumulative
+    result.smoothed_imbalance = pair_data.smoothed_imbalance
+    
+    # OI Delta % calculation
+    if pair_data.prev_open_interest > 0 and pair_data.latest_open_interest > 0:
+        result.oi_delta_pct = (
+            (pair_data.latest_open_interest - pair_data.prev_open_interest) 
+            / pair_data.prev_open_interest * 100
+        )
+    
     # Get historical data for indicators
     # RSI needs 14+1 rolling windows (15 periods)
     # MACD needs 26+9 rolling windows (35 periods)
@@ -306,3 +323,60 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
         )
     
     return result
+
+
+def calculate_indicator_score(indicators: IndicatorResult, pair_data) -> float:
+    """
+    Calculate indicator score matching FAS V2 calculate_indicator_scores_batch_v2.
+    
+    Components:
+    - Volume Z-Score: ±35 (|zscore| > 3) or ±20 (|zscore| > 2)
+    - CVD Component: ±20 (based on CVD direction)
+    - Smoothed Imbalance: ±15 or ±7 (based on imbalance level)
+    - MACD Crossover: ±10 (histogram sign change)
+    
+    Returns:
+        indicator_score (float)
+    """
+    score = 0.0
+    
+    # 1. Volume Z-Score component
+    if indicators.volume_zscore is not None and indicators.price_change_pct is not None:
+        zscore = abs(indicators.volume_zscore)
+        direction = 1 if indicators.price_change_pct >= 0 else -1
+        
+        if zscore > 3.0:
+            score += 35 * direction
+        elif zscore > 2.0:
+            score += 20 * direction
+    
+    # 2. CVD component
+    if indicators.cvd_cumulative is not None and indicators.prev_cvd_cumulative is not None:
+        if indicators.cvd_cumulative > indicators.prev_cvd_cumulative:
+            score += 20  # Bullish
+        elif indicators.cvd_cumulative < indicators.prev_cvd_cumulative:
+            score -= 20  # Bearish
+    
+    # 3. Smoothed Imbalance component
+    if indicators.smoothed_imbalance is not None:
+        imb = indicators.smoothed_imbalance
+        if imb > 0.3:
+            score += 15
+        elif imb > 0.1:
+            score += 7
+        elif imb < -0.3:
+            score -= 15
+        elif imb < -0.1:
+            score -= 7
+    
+    # 4. MACD Crossover component (histogram sign change)
+    if indicators.macd_histogram is not None and pair_data.prev_macd_histogram is not None:
+        prev = pair_data.prev_macd_histogram
+        curr = indicators.macd_histogram
+        
+        if prev < 0 and curr > 0:
+            score += 10  # Bullish crossover
+        elif prev > 0 and curr < 0:
+            score -= 10  # Bearish crossover
+    
+    return score

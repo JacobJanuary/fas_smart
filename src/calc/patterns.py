@@ -17,6 +17,7 @@ class PatternType(str, Enum):
     VOLUME_ANOMALY = "VOLUME_ANOMALY"
     OI_EXPLOSION = "OI_EXPLOSION"
     OI_DIVERGENCE = "OI_DIVERGENCE"
+    OI_COLLAPSE = "OI_COLLAPSE"           # NEW: FAS V2
     CVD_PRICE_DIVERGENCE = "CVD_PRICE_DIVERGENCE"
     FUNDING_EXTREME = "FUNDING_EXTREME"
     FUNDING_FLIP = "FUNDING_FLIP"
@@ -25,6 +26,11 @@ class PatternType(str, Enum):
     MACD_CROSSOVER = "MACD_CROSSOVER"
     MACD_DIVERGENCE = "MACD_DIVERGENCE"
     LIQUIDATION_CASCADE = "LIQUIDATION_CASCADE"
+    # NEW: FAS V2 patterns
+    ACCUMULATION = "ACCUMULATION"
+    DISTRIBUTION = "DISTRIBUTION"
+    MOMENTUM_EXHAUSTION = "MOMENTUM_EXHAUSTION"
+    SQUEEZE_IGNITION = "SQUEEZE_IGNITION"
 
 
 @dataclass
@@ -43,7 +49,8 @@ class PatternThresholds:
     volume_zscore_threshold: float = 2.0
     
     # Open Interest
-    oi_explosion_threshold: float = 5.0  # % change
+    oi_explosion_threshold: float = 7.0   # % change (FAS V2: raised from 5 to 7)
+    oi_collapse_threshold: float = -7.0   # % change (negative)
     oi_divergence_threshold: float = 3.0
     
     # CVD
@@ -62,6 +69,11 @@ class PatternThresholds:
     
     # Liquidations
     liq_cascade_threshold: float = 50.0  # USD notional
+    
+    # Accumulation/Distribution (sideways range)
+    sideways_price_range: float = 1.0  # % max price change for sideways
+    accum_cvd_threshold: float = 0.1   # Positive CVD change
+    accum_volume_threshold: float = 1.5  # Volume Z-score min
 
 
 class PatternDetector:
@@ -97,33 +109,53 @@ class PatternDetector:
             patterns.append(p)
         
         # 2. OI Explosion
-        p = self._detect_oi_explosion(pair_data)
+        p = self._detect_oi_explosion(indicators)
         if p:
             patterns.append(p)
         
-        # 3. CVD-Price Divergence
+        # 3. OI Collapse (NEW)
+        p = self._detect_oi_collapse(indicators)
+        if p:
+            patterns.append(p)
+        
+        # 4. CVD-Price Divergence
         p = self._detect_cvd_divergence(indicators)
         if p:
             patterns.append(p)
         
-        # 4. Funding Extreme
+        # 5. Funding Extreme
         p = self._detect_funding_extreme(pair_data)
         if p:
             patterns.append(p)
         
-        # 5. RSI Extreme
+        # 6. RSI Extreme
         p = self._detect_rsi_extreme(indicators)
         if p:
             patterns.append(p)
         
-        # 6. MACD Crossover
+        # 7. MACD Crossover
         if prev_indicators:
             p = self._detect_macd_crossover(indicators, prev_indicators)
             if p:
                 patterns.append(p)
         
-        # 7. Liquidation Cascade
+        # 8. Liquidation Cascade
         p = self._detect_liquidation_cascade(pair_data)
+        if p:
+            patterns.append(p)
+        
+        # 9. Accumulation (NEW)
+        p = self._detect_accumulation(indicators, pair_data)
+        if p:
+            patterns.append(p)
+        
+        # 10. Distribution (NEW)
+        p = self._detect_distribution(indicators, pair_data)
+        if p:
+            patterns.append(p)
+        
+        # 11. Momentum Exhaustion (NEW)
+        p = self._detect_momentum_exhaustion(indicators, pair_data)
         if p:
             patterns.append(p)
         
@@ -155,16 +187,49 @@ class PatternDetector:
             }
         )
     
-    def _detect_oi_explosion(self, pair_data) -> Optional[Pattern]:
-        """Detect sudden OI increase"""
-        # Need previous OI value - using simple comparison
-        oi = pair_data.latest_open_interest
-        if oi <= 0:
+    def _detect_oi_explosion(self, indicators) -> Optional[Pattern]:
+        """Detect sudden OI increase (>7% change)"""
+        if indicators.oi_delta_pct is None:
             return None
         
-        # Get OI from 15 candles ago (if we tracked it)
-        # For now, this is a placeholder - need OI history in storage
-        return None  # TODO: Implement when OI history is added
+        threshold = self.thresholds.oi_explosion_threshold
+        if indicators.oi_delta_pct < threshold:
+            return None
+        
+        score = 50.0  # Strong bullish signal
+        confidence = min(70 + indicators.oi_delta_pct * 2, 95)
+        
+        return Pattern(
+            pattern_type=PatternType.OI_EXPLOSION,
+            score=score,
+            confidence=confidence,
+            details={
+                'oi_delta_pct': indicators.oi_delta_pct,
+                'threshold': threshold,
+            }
+        )
+    
+    def _detect_oi_collapse(self, indicators) -> Optional[Pattern]:
+        """Detect sudden OI decrease (<-7% change)"""
+        if indicators.oi_delta_pct is None:
+            return None
+        
+        threshold = self.thresholds.oi_collapse_threshold
+        if indicators.oi_delta_pct > threshold:  # threshold is negative
+            return None
+        
+        score = -50.0  # Strong bearish signal
+        confidence = min(70 + abs(indicators.oi_delta_pct) * 2, 90)
+        
+        return Pattern(
+            pattern_type=PatternType.OI_COLLAPSE,
+            score=score,
+            confidence=confidence,
+            details={
+                'oi_delta_pct': indicators.oi_delta_pct,
+                'threshold': threshold,
+            }
+        )
     
     def _detect_cvd_divergence(self, indicators) -> Optional[Pattern]:
         """Detect CVD-Price divergence"""
@@ -330,6 +395,122 @@ class PatternDetector:
                 'long_liquidated': liq_long,
                 'short_liquidated': liq_short,
                 'total': total,
+                'direction': direction,
+            }
+        )
+    
+    def _detect_accumulation(self, indicators, pair_data) -> Optional[Pattern]:
+        """
+        Detect accumulation pattern: 
+        - Sideways price action (small price change)
+        - Elevated volume
+        - Positive CVD (more buying)
+        """
+        if indicators.price_change_pct is None or indicators.volume_zscore is None:
+            return None
+        if indicators.smoothed_imbalance is None:
+            return None
+        
+        # Check for sideways (low price change)
+        if abs(indicators.price_change_pct) > self.thresholds.sideways_price_range:
+            return None
+        
+        # Check for elevated volume
+        if indicators.volume_zscore < self.thresholds.accum_volume_threshold:
+            return None
+        
+        # Check for positive order flow (accumulation)
+        if indicators.smoothed_imbalance < self.thresholds.accum_cvd_threshold:
+            return None
+        
+        score = 20.0  # Bullish
+        confidence = min(60 + indicators.volume_zscore * 5, 85)
+        
+        return Pattern(
+            pattern_type=PatternType.ACCUMULATION,
+            score=score,
+            confidence=confidence,
+            details={
+                'price_change_pct': indicators.price_change_pct,
+                'volume_zscore': indicators.volume_zscore,
+                'smoothed_imbalance': indicators.smoothed_imbalance,
+            }
+        )
+    
+    def _detect_distribution(self, indicators, pair_data) -> Optional[Pattern]:
+        """
+        Detect distribution pattern: 
+        - Sideways price action (small price change)
+        - Elevated volume
+        - Negative CVD (more selling)
+        """
+        if indicators.price_change_pct is None or indicators.volume_zscore is None:
+            return None
+        if indicators.smoothed_imbalance is None:
+            return None
+        
+        # Check for sideways (low price change)
+        if abs(indicators.price_change_pct) > self.thresholds.sideways_price_range:
+            return None
+        
+        # Check for elevated volume
+        if indicators.volume_zscore < self.thresholds.accum_volume_threshold:
+            return None
+        
+        # Check for negative order flow (distribution)
+        if indicators.smoothed_imbalance > -self.thresholds.accum_cvd_threshold:
+            return None
+        
+        score = -20.0  # Bearish
+        confidence = min(60 + indicators.volume_zscore * 5, 85)
+        
+        return Pattern(
+            pattern_type=PatternType.DISTRIBUTION,
+            score=score,
+            confidence=confidence,
+            details={
+                'price_change_pct': indicators.price_change_pct,
+                'volume_zscore': indicators.volume_zscore,
+                'smoothed_imbalance': indicators.smoothed_imbalance,
+            }
+        )
+    
+    def _detect_momentum_exhaustion(self, indicators, pair_data) -> Optional[Pattern]:
+        """
+        Detect momentum exhaustion:
+        - RSI at extreme (overbought/oversold)
+        - MACD showing divergence (histogram decreasing magnitude)
+        """
+        if indicators.rsi is None or indicators.macd_histogram is None:
+            return None
+        if pair_data.prev_macd_histogram is None:
+            return None
+        
+        rsi = indicators.rsi
+        macd_now = abs(indicators.macd_histogram)
+        macd_prev = abs(pair_data.prev_macd_histogram)
+        
+        # Overbought + momentum fading = bearish exhaustion
+        if rsi > self.thresholds.rsi_overbought and macd_now < macd_prev * 0.8:
+            score = -30.0
+            confidence = min(60 + (rsi - 70) * 2, 85)
+            direction = 'BEARISH_EXHAUSTION'
+        # Oversold + momentum fading = bullish exhaustion (reversal signal)
+        elif rsi < self.thresholds.rsi_oversold and macd_now < macd_prev * 0.8:
+            score = 30.0
+            confidence = min(60 + (30 - rsi) * 2, 85)
+            direction = 'BULLISH_EXHAUSTION'
+        else:
+            return None
+        
+        return Pattern(
+            pattern_type=PatternType.MOMENTUM_EXHAUSTION,
+            score=score,
+            confidence=confidence,
+            details={
+                'rsi': rsi,
+                'macd_histogram': indicators.macd_histogram,
+                'prev_macd_histogram': pair_data.prev_macd_histogram,
                 'direction': direction,
             }
         )
