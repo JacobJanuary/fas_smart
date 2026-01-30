@@ -1,0 +1,1 @@
+"""FAS Smart Calculation Module"""

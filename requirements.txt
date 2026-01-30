@@ -9,6 +9,7 @@ aiohttp>=3.9.0
 
 # Data processing
 numpy>=1.26.0
+orjson>=3.9.0
 
 # Async
 asyncio-throttle>=1.0.2
