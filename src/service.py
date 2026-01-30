@@ -289,10 +289,28 @@ class FASService:
     def _save_signals(self, signals: list[dict]):
         """Save signals to database"""
         import json
+        import numpy as np
+        
+        def convert_numpy(obj):
+            """Convert numpy types to Python native types for JSON/DB."""
+            if isinstance(obj, (np.integer, np.int64, np.int32)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float64, np.float32)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, dict):
+                return {k: convert_numpy(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy(v) for v in obj]
+            return obj
         
         with get_cursor() as cur:
             for signal in signals:
                 try:
+                    # Convert all numpy types
+                    signal = convert_numpy(signal)
+                    
                     # Calculate pattern and indicator scores
                     pattern_score = sum(p['score'] for p in signal['patterns'])
                     indicator_score = signal['total_score'] - pattern_score
@@ -313,11 +331,11 @@ class FASService:
                     """, (
                         signal['trading_pair_id'],
                         signal['timestamp'],
-                        pattern_score,
-                        indicator_score,
+                        float(pattern_score),
+                        float(indicator_score),
                         signal['direction'],
-                        signal['confidence'],
-                        signal['entry_price'],
+                        float(signal['confidence']),
+                        float(signal['entry_price']),
                         json.dumps(signal['patterns']),
                         json.dumps(signal['indicators']),
                     ))
