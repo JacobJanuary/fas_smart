@@ -304,9 +304,10 @@ class FASService:
         storage_stats = self.data_store.get_stats()
         oi_stats = self.oi_poller.get_stats() if self.oi_poller else {}
         
-        logger.debug(
-            f"Stats - WS: {ws_stats}, Router: {router_stats}, "
-            f"Storage: {storage_stats}, OI: {oi_stats}"
+        logger.info(
+            f"Stats - Klines: {router_stats.get('klines_closed', 0)}, "
+            f"OI: {oi_stats.get('polls_success', 0)}, "
+            f"Mem: {storage_stats.get('memory_mb', 0):.1f}MB"
         )
 
 

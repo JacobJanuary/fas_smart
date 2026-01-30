@@ -114,7 +114,7 @@ class OpenInterestPoller:
                 await asyncio.sleep(self.batch_delay)
         
         elapsed = (datetime.utcnow() - start_time).total_seconds()
-        logger.debug(f"OI poll completed in {elapsed:.1f}s")
+        logger.info(f"OI poll completed: {len(symbols)} pairs in {elapsed:.1f}s")
     
     async def _fetch_oi(self, symbol: str) -> Optional[float]:
         """Fetch OI for a single symbol"""
