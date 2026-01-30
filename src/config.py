@@ -52,10 +52,19 @@ class ThresholdConfig:
     TIER_2_VOLUME: float = 10_000_000   # >$10M
 
 
+class IPv6Config:
+    """IPv6 rotation configuration for API rate limit bypass"""
+    # IPv6 prefix (e.g., "2001:db8::/64" -> generates random addresses in this range)
+    PREFIX: str = os.getenv('IPV6_PREFIX', '')
+    PREFIX_LENGTH: int = int(os.getenv('IPV6_PREFIX_LENGTH', '64'))
+    ENABLED: bool = bool(os.getenv('IPV6_ENABLED', ''))
+
+
 class Config:
     """Main configuration"""
     DB = DBConfig
     THRESHOLDS = ThresholdConfig
+    IPV6 = IPv6Config
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
     
     # Rolling window settings

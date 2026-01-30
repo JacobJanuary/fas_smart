@@ -8,6 +8,8 @@ Handles:
 
 import asyncio
 import logging
+import random
+import ipaddress
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import aiohttp
@@ -17,6 +19,34 @@ from ws.storage import DataStore, PairData
 from config import config
 
 logger = logging.getLogger(__name__)
+
+
+def generate_ipv6_address() -> Optional[str]:
+    """
+    Generate a random IPv6 address from configured prefix.
+    Returns None if IPv6 is not configured.
+    """
+    if not config.IPV6.ENABLED or not config.IPV6.PREFIX:
+        return None
+    
+    try:
+        # Parse the prefix
+        network = ipaddress.IPv6Network(
+            f"{config.IPV6.PREFIX}/{config.IPV6.PREFIX_LENGTH}", 
+            strict=False
+        )
+        
+        # Generate random suffix
+        suffix_bits = 128 - config.IPV6.PREFIX_LENGTH
+        random_suffix = random.getrandbits(suffix_bits)
+        
+        # Combine prefix and suffix
+        address = network.network_address + random_suffix
+        return str(address)
+        
+    except Exception as e:
+        logger.warning(f"Failed to generate IPv6 address: {e}")
+        return None
 
 
 class WarmupManager:
@@ -108,21 +138,27 @@ class WarmupManager:
             
         logger.info(f"Found {len(gaps_to_fill)} pairs with gaps, filling...")
         
-        # Fill gaps via Binance API (batch with rate limiting)
-        async with aiohttp.ClientSession() as session:
-            # Process in chunks to respect rate limits
-            chunk_size = 50
-            for i in range(0, len(gaps_to_fill), chunk_size):
-                chunk = gaps_to_fill[i:i + chunk_size]
-                tasks = [
-                    self._fetch_and_insert_klines(session, gap)
-                    for gap in chunk
-                ]
-                await asyncio.gather(*tasks, return_exceptions=True)
-                
-                # Rate limit pause
-                if i + chunk_size < len(gaps_to_fill):
-                    await asyncio.sleep(1)
+        # Fill gaps via Binance API with IPv6 rotation
+        if config.IPV6.ENABLED:
+            logger.info("IPv6 rotation enabled, using random addresses per request")
+            # With IPv6 rotation, each request gets new IP - can parallelize more
+            for gap in gaps_to_fill:
+                await self._fetch_and_insert_klines_ipv6(gap)
+        else:
+            # Without IPv6 - use conservative rate limiting
+            async with aiohttp.ClientSession() as session:
+                chunk_size = 20  # Smaller chunks without rotation
+                for i in range(0, len(gaps_to_fill), chunk_size):
+                    chunk = gaps_to_fill[i:i + chunk_size]
+                    tasks = [
+                        self._fetch_and_insert_klines(session, gap)
+                        for gap in chunk
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    
+                    # Rate limit pause (safe: 20 req/2sec = 600 req/min)
+                    if i + chunk_size < len(gaps_to_fill):
+                        await asyncio.sleep(2)
         
         logger.info(f"Gap filling complete")
     
@@ -183,6 +219,68 @@ class WarmupManager:
             
         except Exception as e:
             logger.error(f"Error filling gap for {gap['symbol']}: {e}")
+    
+    async def _fetch_and_insert_klines_ipv6(self, gap: dict):
+        """Fetch klines with IPv6 rotation - new address per request."""
+        try:
+            limit = min(gap['gap_minutes'], self.MAX_KLINES_PER_REQUEST)
+            
+            params = {
+                'symbol': gap['symbol'],
+                'interval': '1m',
+                'limit': limit
+            }
+            
+            # Generate random IPv6 address for this request
+            ipv6_addr = generate_ipv6_address()
+            
+            # Create connector with specific source address
+            connector = aiohttp.TCPConnector(
+                local_addr=(ipv6_addr, 0) if ipv6_addr else None,
+                family=0  # Allow both IPv4 and IPv6
+            )
+            
+            async with aiohttp.ClientSession(connector=connector) as session:
+                async with session.get(self.BINANCE_KLINES_URL, params=params) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Failed to fetch {gap['symbol']}: {resp.status}")
+                        return
+                        
+                    klines = await resp.json()
+            
+            if not klines:
+                return
+                
+            # Insert to DB
+            with get_cursor() as cur:
+                for k in klines:
+                    ts = datetime.utcfromtimestamp(k[0] / 1000)
+                    if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
+                        continue
+                        
+                    volume = float(k[5])
+                    taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
+                    
+                    cur.execute("""
+                        INSERT INTO fas_smart.candles_1m 
+                        (pair_id, ts, open, high, low, close, volume, buy_volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (pair_id, ts) DO NOTHING
+                    """, (
+                        gap['pair_id'],
+                        ts,
+                        float(k[1]),
+                        float(k[2]),
+                        float(k[3]),
+                        float(k[4]),
+                        volume,
+                        taker_buy
+                    ))
+                    
+            logger.debug(f"Filled {len(klines)} candles for {gap['symbol']} via {ipv6_addr or 'default'}")
+            
+        except Exception as e:
+            logger.error(f"Error filling gap for {gap['symbol']} with IPv6: {e}")
     
     async def load_history(self):
         """
