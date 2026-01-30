@@ -379,4 +379,11 @@ def calculate_indicator_score(indicators: IndicatorResult, pair_data) -> float:
         elif prev > 0 and curr < 0:
             score -= 10  # Bearish crossover
     
+    # 5. RSI component (FAS V2 parity)
+    if indicators.rsi is not None:
+        if indicators.rsi > 60:
+            score += 5  # Bullish momentum
+        elif indicators.rsi < 40:
+            score -= 5  # Bearish momentum
+    
     return score
