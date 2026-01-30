@@ -214,7 +214,7 @@ class FASService:
         indicator_score = calculate_indicator_score(indicators, pair_data)
         
         # Apply market regime adjustment (FAS V2 parity)
-        btc_data = self.data_store.get_pair_data('BTCUSDT')
+        btc_data = self.data_store.get_pair('BTCUSDT')
         if btc_data and btc_data.candle_count >= 17:
             regime = calculate_market_regime(btc_data)
             indicator_score = adjust_score_for_regime(indicator_score, regime)
