@@ -155,12 +155,13 @@ class FASService:
                 await asyncio.sleep(5)
     
     async def _wait_for_minute(self):
-        """Wait until the start of the next minute"""
+        """Wait until the start of the next minute + buffer for candle delivery"""
         now = datetime.now(timezone.utc)
         seconds_to_wait = 60 - now.second - now.microsecond / 1_000_000
         
-        # Add small buffer to ensure candle is closed
-        seconds_to_wait += 1.0
+        # Add buffer to ensure all candles are received via WebSocket
+        # Binance sends closed candles at :00.000, but network latency can delay them
+        seconds_to_wait += 5.0
         
         if seconds_to_wait > 0:
             await asyncio.sleep(seconds_to_wait)
