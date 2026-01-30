@@ -272,6 +272,13 @@ class DataStore:
         """Get PairData for a symbol"""
         return self.pairs.get(symbol)
     
+    def get_pair_by_id(self, pair_id: int) -> Optional[PairData]:
+        """Get PairData by pair_id"""
+        symbol = self.pair_id_map.get(pair_id)
+        if symbol:
+            return self.pairs.get(symbol)
+        return None
+    
     def get_all_symbols(self) -> list[str]:
         """Get list of all registered symbols"""
         return list(self.pairs.keys())

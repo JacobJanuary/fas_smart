@@ -19,6 +19,7 @@ from ws.rest_poller import OpenInterestPoller
 from calc.indicators import calculate_all_indicators, calculate_indicator_score
 from calc.patterns import PatternDetector, calculate_total_score
 from calc.market_regime import calculate_market_regime, adjust_score_for_regime
+from warmup import WarmupManager
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ class FASService:
         
         # Previous indicators for each pair (for pattern detection)
         self._prev_indicators: dict = {}
+        
+        # Warmup state
+        self._warmup_manager: Optional[WarmupManager] = None
+        self._warmup_complete = False
     
     async def start(self):
         """Start the service"""
@@ -83,11 +88,25 @@ class FASService:
         )
         await self.oi_poller.start()
         
-        # 5. Start calculation loop
+        # 5. Start warmup in background (non-blocking)
+        self._warmup_manager = WarmupManager(self.data_store)
+        asyncio.create_task(self._run_warmup())
+        
+        # 6. Start calculation loop
         self._running = True
         self._calculation_task = asyncio.create_task(self._calculation_loop())
         
         logger.info(f"FAS Smart Service started with {len(symbols)} pairs")
+    
+    async def _run_warmup(self):
+        """Run warmup in background"""
+        try:
+            success = await self._warmup_manager.run_warmup()
+            self._warmup_complete = success
+            if success:
+                logger.info("Warmup complete, full signal generation enabled")
+        except Exception as e:
+            logger.error(f"Warmup failed: {e}")
     
     async def stop(self):
         """Stop the service gracefully"""
