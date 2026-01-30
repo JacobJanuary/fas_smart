@@ -67,8 +67,8 @@ class PatternThresholds:
     rsi_extreme_overbought: float = 80.0
     rsi_extreme_oversold: float = 20.0
     
-    # Liquidations
-    liq_cascade_threshold: float = 50.0  # USD notional
+    # Liquidations (FAS V2: ratio-based)
+    liq_ratio_threshold: float = 0.03  # 3% of volume
     
     # Accumulation/Distribution (sideways range)
     sideways_price_range: float = 1.0  # % max price change for sideways
@@ -140,7 +140,7 @@ class PatternDetector:
                 patterns.append(p)
         
         # 8. Liquidation Cascade
-        p = self._detect_liquidation_cascade(pair_data)
+        p = self._detect_liquidation_cascade(pair_data, indicators)
         if p:
             patterns.append(p)
         
@@ -367,35 +367,56 @@ class PatternDetector:
             }
         )
     
-    def _detect_liquidation_cascade(self, pair_data) -> Optional[Pattern]:
-        """Detect significant liquidation activity"""
+    def _detect_liquidation_cascade(self, pair_data, indicators) -> Optional[Pattern]:
+        """Detect significant liquidation activity (FAS V2 parity)"""
         liq_long = pair_data.liq_long_current
         liq_short = pair_data.liq_short_current
-        threshold = self.thresholds.liq_cascade_threshold
         
-        total = liq_long + liq_short
-        if total < threshold:
+        total_liq = liq_long + liq_short
+        if total_liq <= 0:
             return None
+        
+        # Get current volume from indicators
+        candles = pair_data.get_last_n_candles(1)
+        if len(candles) == 0:
+            return None
+        
+        volume = float(candles['volume'][0]) if candles['volume'][0] > 0 else 1.0
+        liq_ratio = total_liq / volume
+        
+        # FAS V2: threshold is 3% of volume
+        if liq_ratio < self.thresholds.liq_ratio_threshold:
+            return None
+        
+        # FAS V2 scoring: 80 if >10%, 60 if >5%, else 40
+        if liq_ratio > 0.10:
+            base_score = 80.0
+        elif liq_ratio > 0.05:
+            base_score = 60.0
+        else:
+            base_score = 40.0
         
         # More long liq = bearish, more short liq = bullish
         if liq_long > liq_short:
-            score = -15.0 * (liq_long / total)
-            direction = 'LONG_LIQUIDATIONS'
+            score = -base_score
+            direction = 'LONG'
         else:
-            score = 15.0 * (liq_short / total)
-            direction = 'SHORT_LIQUIDATIONS'
+            score = base_score
+            direction = 'SHORT'
         
-        confidence = min(50 + total / threshold * 10, 80)
+        confidence = min(70 + liq_ratio * 100, 95)
         
         return Pattern(
             pattern_type=PatternType.LIQUIDATION_CASCADE,
             score=score,
             confidence=confidence,
             details={
-                'long_liquidated': liq_long,
-                'short_liquidated': liq_short,
-                'total': total,
-                'direction': direction,
+                'liquidations_long': liq_long,
+                'liquidations_short': liq_short,
+                'total_liquidations': total_liq,
+                'liquidation_ratio': round(liq_ratio, 4),
+                'volume': volume,
+                'dominant_side': direction,
             }
         )
     
