@@ -18,6 +18,7 @@ from ws.storage import DataStore
 from ws.rest_poller import OpenInterestPoller
 from calc.indicators import calculate_all_indicators, calculate_indicator_score
 from calc.patterns import PatternDetector, calculate_total_score
+from calc.market_regime import calculate_market_regime, adjust_score_for_regime
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,15 @@ class FASService:
         
         # Calculate indicator score (FAS V2 parity)
         indicator_score = calculate_indicator_score(indicators, pair_data)
+        
+        # Apply market regime adjustment (FAS V2 parity)
+        btc_data = self.data_store.get_pair_data('BTCUSDT')
+        if btc_data and btc_data.candle_count >= 17:
+            regime = calculate_market_regime(btc_data)
+            indicator_score = adjust_score_for_regime(indicator_score, regime)
+            # Log regime for BTC
+            if symbol == 'BTCUSDT':
+                logger.debug(f"Market regime: {regime.regime} (str={regime.strength:.2f}, btc_4h={regime.btc_change_4h:.2f}%)")
         
         # Total score = pattern_score + indicator_score (matching FAS V2)
         total_score = pattern_score + indicator_score
