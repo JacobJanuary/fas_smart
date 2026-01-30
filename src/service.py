@@ -133,6 +133,10 @@ class FASService:
                 
                 # Run calculations
                 start_time = datetime.now(timezone.utc)
+                
+                # Save latest candles to DB for monitoring
+                self._save_candles_to_db()
+                
                 signals = await self._process_all_pairs()
                 elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
                 
@@ -309,6 +313,47 @@ class FASService:
             f"OI: {oi_stats.get('polls_success', 0)}, "
             f"Mem: {storage_stats.get('memory_mb', 0):.1f}MB"
         )
+    
+    def _save_candles_to_db(self):
+        """Save latest candle for each pair to database for monitoring"""
+        saved = 0
+        
+        with get_cursor() as cur:
+            for symbol in self.data_store.get_all_symbols():
+                pair_data = self.data_store.get_pair(symbol)
+                if not pair_data or pair_data.candle_count == 0:
+                    continue
+                
+                # Get the latest candle
+                candles = pair_data.get_last_n_candles(1)
+                if len(candles) == 0:
+                    continue
+                
+                c = candles[0]
+                try:
+                    cur.execute("""
+                        INSERT INTO fas_smart.candles_1m 
+                        (pair_id, ts, o, h, l, c, v, bv, oi, fr)
+                        VALUES (%s, to_timestamp(%s/1000.0), %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (pair_id, ts) DO NOTHING
+                    """, (
+                        pair_data.pair_id,
+                        int(c['timestamp']),
+                        float(c['open']),
+                        float(c['high']),
+                        float(c['low']),
+                        float(c['close']),
+                        float(c['volume']),
+                        float(c['buy_volume']),
+                        pair_data.latest_open_interest,
+                        pair_data.latest_funding_rate,
+                    ))
+                    saved += 1
+                except Exception as e:
+                    logger.debug(f"Failed to save candle for {symbol}: {e}")
+        
+        if saved > 0:
+            logger.debug(f"Saved {saved} candles to DB")
 
 
 async def run_service():
