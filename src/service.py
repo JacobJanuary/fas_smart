@@ -247,25 +247,38 @@ class FASService:
     
     def _save_signals(self, signals: list[dict]):
         """Save signals to database"""
+        import json
+        
         with get_cursor() as cur:
             for signal in signals:
                 try:
-                    # Insert signal
+                    # Calculate pattern and indicator scores
+                    pattern_score = sum(p['score'] for p in signal['patterns'])
+                    indicator_score = signal['total_score'] - pattern_score
+                    
+                    # Insert signal (total_score is generated column)
                     cur.execute("""
                         INSERT INTO fas_smart.signals 
-                        (trading_pair_id, timestamp, total_score, direction, 
-                         confidence, entry_price, details)
-                        VALUES (%s, %s, %s, %s::fas_smart.signal_direction, 
-                                %s, %s, %s::jsonb)
+                        (pair_id, ts, pattern_score, indicator_score, direction, 
+                         confidence, entry_price, patterns_json, indicators_json)
+                        VALUES (%s, %s, %s, %s, %s::fas_smart.signal_direction, 
+                                %s, %s, %s::jsonb, %s::jsonb)
+                        ON CONFLICT (pair_id, ts) DO UPDATE SET
+                            pattern_score = EXCLUDED.pattern_score,
+                            indicator_score = EXCLUDED.indicator_score,
+                            direction = EXCLUDED.direction,
+                            confidence = EXCLUDED.confidence
                         RETURNING id
                     """, (
                         signal['trading_pair_id'],
                         signal['timestamp'],
-                        signal['total_score'],
+                        pattern_score,
+                        indicator_score,
                         signal['direction'],
                         signal['confidence'],
                         signal['entry_price'],
-                        str(signal),  # JSON details
+                        json.dumps(signal['patterns']),
+                        json.dumps(signal['indicators']),
                     ))
                     
                     signal_id = cur.fetchone()[0]
@@ -274,15 +287,16 @@ class FASService:
                     for pattern in signal['patterns']:
                         cur.execute("""
                             INSERT INTO fas_smart.signal_patterns
-                            (signal_id, pattern_type, timeframe, score_impact, 
+                            (signal_id, pattern, timeframe, score_impact, 
                              confidence, details)
-                            VALUES (%s, %s::fas_smart.pattern_type, '15m', %s, %s, %s::jsonb)
+                            VALUES (%s, %s::fas_smart.pattern_type, '15m'::fas_smart.timeframe_enum, %s, %s, %s::jsonb)
+                            ON CONFLICT (signal_id, pattern, timeframe) DO NOTHING
                         """, (
                             signal_id,
                             pattern['type'],
                             pattern['score'],
                             pattern['confidence'],
-                            str(pattern['details']),
+                            json.dumps(pattern['details']),
                         ))
                     
                     # Update last_signal_at on trading_pair
