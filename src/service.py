@@ -346,6 +346,11 @@ class FASService:
         if pair_data.latest_open_interest > 0:
             pair_data.prev_open_interest = pair_data.latest_open_interest
         
+        # FAS V2 PARITY: Only generate signal if at least one 15m pattern exists
+        # No pattern = no signal (indicator score alone is not enough)
+        if not patterns:
+            return None
+        
         # Only generate signal if score is significant
         if abs(total_score) < 10:
             return None
