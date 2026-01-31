@@ -246,74 +246,102 @@ class WarmupManager:
         session: aiohttp.ClientSession, 
         gap: dict
     ):
-        """Fetch klines via rotating proxy - new IP per request with retry."""
-        for attempt in range(self.PROXY_RETRY_ATTEMPTS):
-            try:
-                limit = min(gap['gap_minutes'], self.MAX_KLINES_PER_REQUEST)
-                
-                params = {
-                    'symbol': gap['symbol'],
-                    'interval': '1m',
-                    'limit': limit
-                }
-                
-                # Generate unique session ID for IP rotation
-                session_id = f"{gap['symbol']}{random.randint(10000, 99999)}"
-                proxy_url = config.PROXY.get_rotating_url(session_id)
-                
-                async with session.get(
-                    self.BINANCE_KLINES_URL, 
-                    params=params,
-                    proxy=proxy_url,
-                    timeout=aiohttp.ClientTimeout(total=20)
-                ) as resp:
-                    if resp.status == 502 or resp.status == 503:
-                        # Proxy overload - retry with backoff
-                        await asyncio.sleep(1 * (attempt + 1))
-                        continue
-                    if resp.status != 200:
-                        logger.warning(f"Failed to fetch {gap['symbol']}: {resp.status}")
-                        return
-                        
-                    klines = await resp.json()
-                
-                if not klines:
-                    return
+        """Fetch klines via rotating proxy - multiple batches for large gaps."""
+        total_minutes = min(gap['gap_minutes'], self.MAX_RESTORE_MINUTES)
+        now_ms = int(datetime.utcnow().timestamp() * 1000)
+        
+        # Calculate target start time
+        target_start_ms = now_ms - (total_minutes * 60 * 1000)
+        current_end_ms = now_ms
+        total_inserted = 0
+        batch_num = 0
+        
+        while current_end_ms > target_start_ms:
+            batch_num += 1
+            success = False
+            
+            for attempt in range(self.PROXY_RETRY_ATTEMPTS):
+                try:
+                    params = {
+                        'symbol': gap['symbol'],
+                        'interval': '1m',
+                        'endTime': current_end_ms,
+                        'limit': 1000  # Max per request
+                    }
                     
-                # Insert to DB
-                with get_cursor() as cur:
-                    for k in klines:
-                        ts = datetime.utcfromtimestamp(k[0] / 1000)
-                        if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
+                    # Generate unique session ID for IP rotation
+                    session_id = f"{gap['symbol']}{batch_num}{random.randint(10000, 99999)}"
+                    proxy_url = config.PROXY.get_rotating_url(session_id)
+                    
+                    async with session.get(
+                        self.BINANCE_KLINES_URL, 
+                        params=params,
+                        proxy=proxy_url,
+                        timeout=aiohttp.ClientTimeout(total=30)
+                    ) as resp:
+                        if resp.status == 502 or resp.status == 503:
+                            await asyncio.sleep(1 * (attempt + 1))
                             continue
+                        if resp.status != 200:
+                            logger.warning(f"Failed to fetch {gap['symbol']} batch {batch_num}: {resp.status}")
+                            return
                             
-                        volume = float(k[5])
-                        taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
-                        
-                        cur.execute("""
-                            INSERT INTO fas_smart.candles_1m 
-                            (pair_id, ts, o, h, l, c, v, bv)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (pair_id, ts) DO NOTHING
-                        """, (
-                            gap['pair_id'],
-                            ts,
-                            float(k[1]),
-                            float(k[2]),
-                            float(k[3]),
-                            float(k[4]),
-                            volume,
-                            taker_buy
-                        ))
-                        
-                logger.debug(f"Filled {len(klines)} candles for {gap['symbol']} via proxy")
-                return  # Success, exit retry loop
-                
-            except Exception as e:
-                if attempt < self.PROXY_RETRY_ATTEMPTS - 1:
-                    await asyncio.sleep(1 * (attempt + 1))
-                else:
-                    logger.error(f"Error filling gap for {gap['symbol']} after {self.PROXY_RETRY_ATTEMPTS} attempts: {e}")
+                        klines = await resp.json()
+                    
+                    if not klines:
+                        success = True
+                        break  # No more data
+                    
+                    # Insert to DB
+                    inserted = 0
+                    with get_cursor() as cur:
+                        for k in klines:
+                            ts = datetime.utcfromtimestamp(k[0] / 1000)
+                            if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
+                                continue
+                                
+                            volume = float(k[5])
+                            taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
+                            
+                            cur.execute("""
+                                INSERT INTO fas_smart.candles_1m 
+                                (pair_id, ts, o, h, l, c, v, bv)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                ON CONFLICT (pair_id, ts) DO NOTHING
+                            """, (
+                                gap['pair_id'],
+                                ts,
+                                float(k[1]),
+                                float(k[2]),
+                                float(k[3]),
+                                float(k[4]),
+                                volume,
+                                taker_buy
+                            ))
+                            inserted += 1
+                    
+                    total_inserted += inserted
+                    
+                    # Move endTime to before the earliest candle in this batch
+                    earliest_open_time = klines[0][0]  # First element is openTime
+                    current_end_ms = earliest_open_time - 1
+                    
+                    success = True
+                    break
+                    
+                except Exception as e:
+                    if attempt < self.PROXY_RETRY_ATTEMPTS - 1:
+                        await asyncio.sleep(1 * (attempt + 1))
+                    else:
+                        logger.error(f"Error fetching {gap['symbol']} batch {batch_num}: {e}")
+                        return
+            
+            if not success:
+                break
+        
+        if total_inserted > 0:
+            logger.debug(f"Filled {total_inserted} candles for {gap['symbol']} in {batch_num} batches")
+    
     
     
     async def _fetch_and_insert_klines_ipv6(self, gap: dict):
