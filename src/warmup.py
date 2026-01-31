@@ -246,10 +246,22 @@ class WarmupManager:
             async with aiohttp.ClientSession() as session:
                 for i in range(0, len(gaps_to_fill), self.PROXY_PARALLEL_REQUESTS):
                     chunk = gaps_to_fill[i:i + self.PROXY_PARALLEL_REQUESTS]
-                    tasks = [
-                        self._fetch_and_insert_klines_proxy(session, gap)
-                        for gap in chunk
-                    ]
+                    
+                    # Wrap each task with timeout
+                    async def fetch_with_timeout(gap):
+                        try:
+                            return await asyncio.wait_for(
+                                self._fetch_and_insert_klines_proxy(session, gap),
+                                timeout=60.0  # 60s max per symbol
+                            )
+                        except asyncio.TimeoutError:
+                            logger.error(f"⏰ TIMEOUT: {gap['symbol']} took >60s, skipping")
+                            return None
+                        except Exception as e:
+                            logger.error(f"❌ ERROR: {gap['symbol']}: {e}")
+                            return None
+                    
+                    tasks = [fetch_with_timeout(gap) for gap in chunk]
                     await asyncio.gather(*tasks, return_exceptions=True)
                     logger.info(f"Processed {min(i + self.PROXY_PARALLEL_REQUESTS, len(gaps_to_fill))}/{len(gaps_to_fill)} pairs")
         elif config.IPV6.ENABLED:
