@@ -60,7 +60,7 @@ class WarmupManager:
     
     BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
     MAX_KLINES_PER_REQUEST = 1000
-    GAP_THRESHOLD_MINUTES = 2
+    GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
     def __init__(self, data_store: DataStore):
