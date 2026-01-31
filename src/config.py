@@ -61,26 +61,48 @@ class IPv6Config:
 
 
 class ProxyConfig:
-    """DECODO datacenter proxy configuration for API rate limit bypass"""
-    # DECODO uses port rotation for IP rotation (each port = different IP)
+    """Proxy list configuration - loads from proxy.txt file"""
     ENABLED: bool = bool(os.getenv('PROXY_ENABLED', ''))
-    HOST: str = os.getenv('PROXY_HOST', 'dc.decodo.com')
-    PORT_MIN: int = int(os.getenv('PROXY_PORT_MIN', '10001'))
-    PORT_MAX: int = int(os.getenv('PROXY_PORT_MAX', '60000'))
-    USER: str = os.getenv('PROXY_USER', '')  # e.g., sppcmd7blj
-    PASSWORD: str = os.getenv('PROXY_PASSWORD', '')
+    PROXY_FILE: str = os.path.join(os.path.dirname(__file__), '..', 'proxy.txt')
+    
+    _proxies: list = None
+    
+    @classmethod
+    def _load_proxies(cls) -> list:
+        """Load proxies from file (cached)."""
+        if cls._proxies is not None:
+            return cls._proxies
+        
+        cls._proxies = []
+        try:
+            proxy_path = os.path.abspath(cls.PROXY_FILE)
+            with open(proxy_path, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    # Skip comments and empty lines
+                    if line and not line.startswith('#'):
+                        cls._proxies.append(line)
+            print(f"Loaded {len(cls._proxies)} proxies from {proxy_path}")
+        except FileNotFoundError:
+            print(f"Warning: proxy.txt not found at {cls.PROXY_FILE}")
+        return cls._proxies
     
     @classmethod
     def get_rotating_url(cls, session_id: str = None) -> str:
-        """Get proxy URL with random port for IP rotation."""
+        """Get random proxy URL from list."""
         import random
-        if not cls.ENABLED or not cls.USER:
+        if not cls.ENABLED:
             return None
         
-        # DECODO: each port gives a different IP
-        port = random.randint(cls.PORT_MIN, cls.PORT_MAX)
+        proxies = cls._load_proxies()
+        if not proxies:
+            return None
         
-        return f"http://{cls.USER}:{cls.PASSWORD}@{cls.HOST}:{port}"
+        # Random proxy from list
+        proxy = random.choice(proxies)
+        
+        # Format: ip:port -> http://ip:port
+        return f"http://{proxy}"
 
 
 class Config:

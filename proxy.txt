@@ -1,0 +1,6 @@
+# Proxy list for FAS Smart warmup
+# Format: ip:port (one per line)
+# Example:
+# 170.106.184.175:19675
+# 49.51.133.55:19253
+# 43.157.3.235:19839
