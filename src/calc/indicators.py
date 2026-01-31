@@ -376,6 +376,120 @@ def calculate_indicator_score(indicators: IndicatorResult, pair_data) -> float:
     return score
 
 
+# FAS V2 TF Multipliers
+TF_MULTIPLIERS = {
+    '15m': 1.0,
+    '1h': 1.1,
+    '4h': 1.3,
+    '1d': 1.5,
+}
+
+
+def calculate_multi_tf_indicator_score(
+    indicators_15m: IndicatorResult,
+    htf_indicators: dict[str, IndicatorResult],
+    pair_data,
+    htf_prev_macd: dict[str, float] = None
+) -> float:
+    """
+    Calculate indicator score with multi-TF averaging (FAS V2 parity).
+    
+    For each timeframe:
+    1. Calculate indicator score components
+    2. Apply TF multiplier (15m=1.0, 1h=1.1, 4h=1.3, 1d=1.5)
+    3. Average all non-zero scores
+    
+    Args:
+        indicators_15m: IndicatorResult for 15m timeframe
+        htf_indicators: Dict of HTF indicator results {'1h': ..., '4h': ..., '1d': ...}
+        pair_data: PairData instance
+        htf_prev_macd: Dict of previous MACD histogram values for HTF
+    
+    Returns:
+        Averaged indicator score with TF weighting
+    """
+    tf_scores = []
+    htf_prev_macd = htf_prev_macd or {}
+    
+    # 1. Calculate 15m score
+    score_15m = _calculate_tf_score_components(indicators_15m, pair_data.prev_macd_histogram)
+    if score_15m != 0:
+        tf_scores.append(score_15m * TF_MULTIPLIERS['15m'])
+    
+    # 2. Calculate HTF scores
+    for tf in ['1h', '4h', '1d']:
+        if tf in htf_indicators:
+            htf_ind = htf_indicators[tf]
+            prev_macd = htf_prev_macd.get(tf)
+            score = _calculate_tf_score_components(htf_ind, prev_macd)
+            if score != 0:
+                tf_scores.append(score * TF_MULTIPLIERS[tf])
+    
+    # 3. Average non-zero scores
+    if not tf_scores:
+        return 0.0
+    
+    return sum(tf_scores) / len(tf_scores)
+
+
+def _calculate_tf_score_components(indicators: IndicatorResult, prev_macd: float = None) -> float:
+    """
+    Calculate indicator score components for a single timeframe.
+    
+    Components (FAS V2):
+    - Volume Z-Score: ±35 (>3) or ±20 (>2)
+    - CVD Delta: ±20
+    - Smoothed Imbalance: ±15/7
+    - MACD Crossover: ±10
+    - RSI: ±5
+    """
+    score = 0.0
+    
+    # 1. Volume Z-Score
+    if indicators.volume_zscore is not None and indicators.price_change_pct is not None:
+        zscore = abs(indicators.volume_zscore)
+        direction = 1 if indicators.price_change_pct >= 0 else -1
+        if zscore > 3.0:
+            score += 35 * direction
+        elif zscore > 2.0:
+            score += 20 * direction
+    
+    # 2. CVD Delta
+    if indicators.cvd_cumulative is not None and indicators.prev_cvd_cumulative is not None:
+        if indicators.cvd_cumulative > indicators.prev_cvd_cumulative:
+            score += 20
+        elif indicators.cvd_cumulative < indicators.prev_cvd_cumulative:
+            score -= 20
+    
+    # 3. Smoothed Imbalance
+    if indicators.smoothed_imbalance is not None:
+        imb = indicators.smoothed_imbalance
+        if imb > 0.3:
+            score += 15
+        elif imb > 0.1:
+            score += 7
+        elif imb < -0.3:
+            score -= 15
+        elif imb < -0.1:
+            score -= 7
+    
+    # 4. MACD Crossover
+    if indicators.macd_histogram is not None and prev_macd is not None:
+        if prev_macd < 0 and indicators.macd_histogram > 0:
+            score += 10
+        elif prev_macd > 0 and indicators.macd_histogram < 0:
+            score -= 10
+    
+    # 5. RSI
+    if indicators.rsi is not None:
+        if indicators.rsi > 60:
+            score += 5
+        elif indicators.rsi < 40:
+            score -= 5
+    
+    return score
+
+
 def calculate_htf_indicators(pair_data, timeframe: str) -> IndicatorResult:
     """
     Calculate indicators from higher timeframe candles (1h, 4h, 1d).

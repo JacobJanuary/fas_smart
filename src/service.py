@@ -16,7 +16,7 @@ from ws.connection import BinanceWSManager, ConnectionConfig
 from ws.handlers import MessageRouter
 from ws.storage import DataStore
 from ws.rest_poller import OpenInterestPoller
-from calc.indicators import calculate_all_indicators, calculate_indicator_score, calculate_htf_indicators
+from calc.indicators import calculate_all_indicators, calculate_indicator_score, calculate_htf_indicators, calculate_multi_tf_indicator_score
 from calc.patterns import PatternDetector, calculate_total_score, detect_htf_patterns, calculate_multi_tf_score
 from calc.market_regime import calculate_market_regime, adjust_score_for_regime
 from warmup import WarmupManager
@@ -48,6 +48,9 @@ class FASService:
         
         # Previous indicators for each pair (for pattern detection)
         self._prev_indicators: dict = {}
+        
+        # Previous HTF MACD histogram for each pair (for multi-TF indicator score)
+        self._prev_htf_macd: dict[str, dict[str, float]] = {}
         
         # Warmup state
         self._warmup_manager: Optional[WarmupManager] = None
@@ -302,8 +305,12 @@ class FASService:
         }
         htf_patterns = detect_htf_patterns(self.pattern_detector, pair_data, htf_indicators)
         
-        # Calculate indicator score (FAS V2 parity)
-        indicator_score = calculate_indicator_score(indicators, pair_data)
+        # Calculate indicator score with multi-TF averaging (FAS V2 parity)
+        # Uses TF multipliers: 15m=1.0, 1h=1.1, 4h=1.3, 1d=1.5
+        htf_prev_macd = self._prev_htf_macd.get(symbol, {})
+        indicator_score = calculate_multi_tf_indicator_score(
+            indicators, htf_indicators, pair_data, htf_prev_macd
+        )
         
         # Apply market regime adjustment (FAS V2 parity)
         btc_data = self.data_store.get_pair('BTCUSDT')
@@ -345,6 +352,13 @@ class FASService:
         # Update prev OI for next delta calculation
         if pair_data.latest_open_interest > 0:
             pair_data.prev_open_interest = pair_data.latest_open_interest
+        
+        # Store HTF MACD for next iteration (multi-TF indicator score)
+        self._prev_htf_macd[symbol] = {
+            tf: htf_ind.macd_histogram
+            for tf, htf_ind in htf_indicators.items()
+            if htf_ind.macd_histogram is not None
+        }
         
         # FAS V2 PARITY: Only generate signal if at least one 15m pattern exists
         # No pattern = no signal (indicator score alone is not enough)
