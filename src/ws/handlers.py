@@ -169,6 +169,9 @@ class MessageRouter:
         self.stats = {
             'klines_received': 0,
             'klines_closed': 0,
+            'klines_1h_closed': 0,
+            'klines_4h_closed': 0,
+            'klines_1d_closed': 0,
             'liquidations_received': 0,
             'mark_prices_received': 0,
             'errors': 0,
@@ -197,16 +200,24 @@ class MessageRouter:
             logger.error(f"Error handling message from {stream_name}: {e}")
     
     async def _handle_kline(self, data: dict):
-        """Handle kline message"""
+        """Handle kline message - routes 1m to main storage, HTF to HTF storage"""
         candle = parse_kline(data)
         if candle:
             self.stats['klines_received'] += 1
             
             # Only store closed candles
             if candle.is_closed:
-                self.stats['klines_closed'] += 1
-                await self.data_store.add_candle(candle)
-                logger.debug(f"Stored closed candle: {candle.symbol} @ {candle.timestamp}")
+                # Get interval from the kline data
+                interval = data.get('k', {}).get('i', '1m')
+                
+                if interval == '1m':
+                    self.stats['klines_closed'] += 1
+                    await self.data_store.add_candle(candle)
+                    logger.debug(f"Stored closed 1m candle: {candle.symbol} @ {candle.timestamp}")
+                elif interval in ('1h', '4h', '1d'):
+                    self.stats[f'klines_{interval}_closed'] += 1
+                    await self.data_store.add_htf_candle(candle, interval)
+                    logger.debug(f"Stored closed {interval} candle: {candle.symbol} @ {candle.timestamp}")
     
     async def _handle_force_order(self, data: dict):
         """Handle liquidation message"""

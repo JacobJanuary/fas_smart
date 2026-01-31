@@ -8,6 +8,7 @@ Handles:
 
 import asyncio
 import logging
+import os
 import random
 import ipaddress
 from datetime import datetime, timedelta
@@ -59,6 +60,7 @@ class WarmupManager:
     """
     
     BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
+    BINANCE_TICKERS_URL = "https://fapi.binance.com/fapi/v1/ticker/24hr"
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
     MAX_RESTORE_HOURS = int(os.getenv('RESTORE_HOURS', '168'))  # Default 7 days (168 hours)
@@ -81,10 +83,16 @@ class WarmupManager:
         try:
             logger.info("Starting warmup sequence...")
             
-            # Step 1: Detect and fill gaps
+            # Step 0: Fetch 24h tickers to determine liquidity tiers
+            await self.update_tiers()
+            
+            # Step 1: Detect and fill gaps for 1m candles
             await self.fill_gaps()
             
-            # Step 2: Load history from DB to memory
+            # Step 2: Fill higher timeframe candles (1h, 4h, 1d)
+            await self.fill_htf_gaps()
+            
+            # Step 3: Load history from DB to memory
             await self.load_history()
             
             self.warmup_complete = True
@@ -183,6 +191,90 @@ class WarmupManager:
                         await asyncio.sleep(2)
         
         logger.info(f"Gap filling complete")
+    
+    async def fill_htf_gaps(self):
+        """
+        Fill higher timeframe candles (1h, 4h, 1d) directly into memory.
+        Fetches 24 candles per timeframe for each pair.
+        """
+        logger.info("Loading HTF candles (1h, 4h, 1d)...")
+        
+        symbols = self.data_store.get_all_symbols()
+        # Filter non-ASCII symbols
+        symbols = [s for s in symbols if s.isascii()]
+        
+        htf_intervals = {
+            '1h': 50,   # 50 candles for MACD(35) + padding
+            '4h': 50,   # 50 candles for MACD(35) + padding
+            '1d': 50,   # 50 candles for MACD(35) + padding
+        }
+        
+        if not config.PROXY.ENABLED and not config.IPV6.ENABLED:
+            logger.warning("HTF warmup requires proxy or IPv6 - skipping")
+            return
+        
+        total_requests = len(symbols) * len(htf_intervals)
+        completed = 0
+        
+        async with aiohttp.ClientSession() as session:
+            for interval, limit in htf_intervals.items():
+                logger.info(f"Fetching {interval} candles for {len(symbols)} pairs...")
+                
+                for i in range(0, len(symbols), self.PROXY_PARALLEL_REQUESTS):
+                    chunk = symbols[i:i + self.PROXY_PARALLEL_REQUESTS]
+                    tasks = [
+                        self._fetch_htf_candles(session, symbol, interval, limit)
+                        for symbol in chunk
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    completed += len(chunk)
+                    
+                logger.info(f"Loaded {interval} candles for all pairs")
+        
+        logger.info(f"HTF candle loading complete")
+    
+    async def _fetch_htf_candles(
+        self,
+        session: aiohttp.ClientSession,
+        symbol: str,
+        interval: str,
+        limit: int
+    ):
+        """Fetch HTF candles from Binance and store in memory."""
+        url = f"{self.BINANCE_KLINES_URL}?symbol={symbol}&interval={interval}&limit={limit}"
+        
+        for attempt in range(self.PROXY_RETRY_ATTEMPTS):
+            try:
+                proxy_url = config.PROXY.get_rotating_url()
+                async with session.get(url, proxy=proxy_url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 451:
+                        await asyncio.sleep(0.5)
+                        continue
+                    if resp.status == 429:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    if resp.status == 200:
+                        klines = await resp.json()
+                        pair_data = self.data_store.get_pair(symbol)
+                        if pair_data and klines:
+                            for k in klines:
+                                pair_data.add_htf_candle(
+                                    timeframe=interval,
+                                    timestamp=k[6],  # Close time
+                                    o=float(k[1]),
+                                    h=float(k[2]),
+                                    l=float(k[3]),
+                                    c=float(k[4]),
+                                    volume=float(k[5]),
+                                    buy_volume=float(k[9]),  # Taker buy volume
+                                )
+                            logger.debug(f"Loaded {len(klines)} {interval} candles for {symbol}")
+                        return
+            except Exception as e:
+                if attempt == self.PROXY_RETRY_ATTEMPTS - 1:
+                    logger.warning(f"Failed to fetch {interval} candles for {symbol}: {e}")
+                await asyncio.sleep(1)
+
     
     async def _fetch_and_insert_klines(
         self, 
@@ -517,3 +609,53 @@ class WarmupManager:
             
         except Exception as e:
             logger.warning(f"Could not restore CVD: {e}")
+    
+    async def update_tiers(self):
+        """
+        Fetch 24h tickers from Binance and update liquidity tier per pair.
+        
+        Uses quoteVolume (24h volume in USD) to determine tier:
+        - TIER_1: >= $100M
+        - TIER_2: >= $10M  
+        - TIER_3: < $10M
+        """
+        from config import ThresholdConfig
+        
+        logger.info("Fetching 24h tickers for tier classification...")
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.BINANCE_TICKERS_URL) as resp:
+                    if resp.status != 200:
+                        logger.warning(f"Failed to fetch tickers: {resp.status}")
+                        return
+                    
+                    tickers = await resp.json()
+            
+            # Map symbol -> quoteVolume
+            volume_map = {}
+            for t in tickers:
+                symbol = t.get('symbol', '')
+                if symbol.endswith('USDT'):
+                    try:
+                        volume_map[symbol] = float(t.get('quoteVolume', 0))
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Update tier for each pair in data store
+            updated = 0
+            for symbol, pair_data in self.data_store._pairs.items():
+                vol_24h = volume_map.get(symbol, 0)
+                pair_data.tier = ThresholdConfig.get_tier(vol_24h)
+                updated += 1
+            
+            # Count tiers
+            tier_counts = {'TIER_1': 0, 'TIER_2': 0, 'TIER_3': 0}
+            for pair_data in self.data_store._pairs.values():
+                tier_counts[pair_data.tier] = tier_counts.get(pair_data.tier, 0) + 1
+            
+            logger.info(f"Updated tiers for {updated} pairs: {tier_counts}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to update tiers: {e}")
+

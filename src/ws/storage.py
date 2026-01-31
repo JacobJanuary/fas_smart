@@ -30,8 +30,12 @@ CANDLE_DTYPE = np.dtype([
     ('funding_rate', 'f8'),
 ])
 
-# Default buffer size: 7 days = 10080 minutes
-DEFAULT_BUFFER_SIZE = 10080
+# Buffer sizes per timeframe
+DEFAULT_BUFFER_SIZE = 10080  # 7 days = 10080 minutes
+HTF_BUFFER_SIZE = 50  # Higher timeframes: 35 (MACD) + padding
+
+# Supported higher timeframes
+HIGHER_TIMEFRAMES = ['1h', '4h', '1d']
 
 
 @dataclass
@@ -49,6 +53,9 @@ class PairData:
     latest_funding_rate: float = 0.0
     latest_open_interest: float = 0.0  # Updated via REST
     prev_open_interest: float = 0.0    # For OI delta calculation
+    
+    # Liquidity tier (cached, updated periodically)
+    tier: str = 'TIER_2'  # Default to TIER_2
     
     # Liquidations accumulator for current minute
     liq_long_current: float = 0.0
@@ -74,9 +81,25 @@ class PairData:
     prev_rsi: Optional[float] = None
     prev_price_change: Optional[float] = None
     
+    # Higher timeframe candle buffers (for multi-TF pattern detection)
+    candles_1h: np.ndarray = field(default=None)
+    candles_4h: np.ndarray = field(default=None)
+    candles_1d: np.ndarray = field(default=None)
+    
+    # HTF write indices and counts
+    htf_write_idx: Dict[str, int] = field(default_factory=dict)
+    htf_candle_count: Dict[str, int] = field(default_factory=dict)
+    
     def __post_init__(self):
         if self.candles is None:
             self.candles = np.zeros(DEFAULT_BUFFER_SIZE, dtype=CANDLE_DTYPE)
+        # Initialize HTF buffers
+        if self.candles_1h is None:
+            self.candles_1h = np.zeros(HTF_BUFFER_SIZE, dtype=CANDLE_DTYPE)
+            self.candles_4h = np.zeros(HTF_BUFFER_SIZE, dtype=CANDLE_DTYPE)
+            self.candles_1d = np.zeros(HTF_BUFFER_SIZE, dtype=CANDLE_DTYPE)
+            self.htf_write_idx = {'1h': 0, '4h': 0, '1d': 0}
+            self.htf_candle_count = {'1h': 0, '4h': 0, '1d': 0}
     
     def add_candle(self, timestamp: int, o: float, h: float, l: float, 
                    c: float, volume: float, buy_volume: float):
@@ -105,6 +128,44 @@ class PairData:
                 sma3 = sum(self.imbalance_history[-3:]) / 3
                 sma6 = sum(self.imbalance_history[-6:]) / min(6, len(self.imbalance_history))
                 self.smoothed_imbalance = (sma3 + sma6) / 2
+    
+    def add_htf_candle(self, timeframe: str, timestamp: int, o: float, h: float, 
+                       l: float, c: float, volume: float, buy_volume: float):
+        """Add a candle to higher timeframe buffer (1h, 4h, 1d)"""
+        if timeframe == '1h':
+            buffer = self.candles_1h
+        elif timeframe == '4h':
+            buffer = self.candles_4h
+        elif timeframe == '1d':
+            buffer = self.candles_1d
+        else:
+            return
+        
+        idx = self.htf_write_idx.get(timeframe, 0)
+        buffer[idx] = (timestamp, o, h, l, c, volume, buy_volume, 0.0)
+        self.htf_write_idx[timeframe] = (idx + 1) % HTF_BUFFER_SIZE
+        self.htf_candle_count[timeframe] = min(
+            self.htf_candle_count.get(timeframe, 0) + 1, HTF_BUFFER_SIZE
+        )
+    
+    def get_htf_candles(self, timeframe: str, n: int = 24) -> np.ndarray:
+        """Get last N candles from higher timeframe buffer"""
+        if timeframe == '1h':
+            buffer = self.candles_1h
+        elif timeframe == '4h':
+            buffer = self.candles_4h
+        elif timeframe == '1d':
+            buffer = self.candles_1d
+        else:
+            return np.array([])
+        
+        count = min(n, self.htf_candle_count.get(timeframe, 0))
+        if count == 0:
+            return np.array([])
+        
+        idx = self.htf_write_idx.get(timeframe, 0)
+        indices = [(idx - 1 - i) % HTF_BUFFER_SIZE for i in range(count)]
+        return buffer[indices[::-1]]
     
     def get_last_n_candles(self, n: int) -> np.ndarray:
         """Get the last N candles in chronological order"""
@@ -228,6 +289,25 @@ class DataStore:
         
         pair_data = self.pairs[symbol]
         pair_data.add_candle(
+            timestamp=candle.timestamp,
+            o=candle.open,
+            h=candle.high,
+            l=candle.low,
+            c=candle.close,
+            volume=candle.volume,
+            buy_volume=candle.buy_volume,
+        )
+        return True
+    
+    async def add_htf_candle(self, candle, timeframe: str) -> bool:
+        """Add a closed candle to higher timeframe storage (1h, 4h, 1d)"""
+        symbol = candle.symbol
+        if symbol not in self.pairs:
+            return False
+        
+        pair_data = self.pairs[symbol]
+        pair_data.add_htf_candle(
+            timeframe=timeframe,
             timestamp=candle.timestamp,
             o=candle.open,
             h=candle.high,

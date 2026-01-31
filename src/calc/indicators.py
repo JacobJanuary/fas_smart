@@ -374,3 +374,61 @@ def calculate_indicator_score(indicators: IndicatorResult, pair_data) -> float:
             score -= 5  # Bearish momentum
     
     return score
+
+
+def calculate_htf_indicators(pair_data, timeframe: str) -> IndicatorResult:
+    """
+    Calculate indicators from higher timeframe candles (1h, 4h, 1d).
+    
+    Args:
+        pair_data: PairData instance with HTF buffers
+        timeframe: '1h', '4h', or '1d'
+    
+    Returns:
+        IndicatorResult with calculated values
+    """
+    result = IndicatorResult()
+    
+    # Get HTF candles (50 for MACD support)
+    candles = pair_data.get_htf_candles(timeframe, 50)
+    if len(candles) < 5:
+        return result
+    
+    # Extract arrays
+    closes = candles['close']
+    volumes = candles['volume']
+    buy_volumes = candles['buy_volume']
+    highs = candles['high']
+    lows = candles['low']
+    
+    # Volume Z-Score (20 periods)
+    if len(volumes) >= 20:
+        result.volume_zscore = calculate_volume_zscore(volumes, 20)
+    
+    # Price change %
+    if len(closes) >= 2:
+        result.price_change_pct = calculate_price_change(closes)
+    
+    # Normalized imbalance (latest candle)
+    if len(volumes) > 0 and volumes[-1] > 0:
+        result.normalized_imbalance = calculate_normalized_imbalance(
+            volumes[-1], buy_volumes[-1]
+        )
+    
+    # ATR
+    if len(closes) >= 14:
+        result.atr = calculate_atr(highs, lows, closes, 14)
+    
+    # RSI
+    if len(closes) >= 15:
+        rsi, _, _ = calculate_rsi(closes, 14)
+        result.rsi = rsi
+    
+    # MACD (requires 35 candles)
+    if len(closes) >= 35:
+        macd, signal, hist = calculate_macd(closes)
+        result.macd_line = macd
+        result.macd_signal = signal
+        result.macd_histogram = hist
+    
+    return result

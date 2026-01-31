@@ -46,17 +46,20 @@ class Pattern:
 @dataclass
 class PatternThresholds:
     """Configurable thresholds for pattern detection"""
-    # Volume
-    volume_zscore_threshold: float = 2.0
+    # Volume (default for TIER_2)
+    volume_zscore_threshold: float = 3.0
     
-    # Open Interest
-    oi_explosion_threshold: float = 7.0   # % change (FAS V2: raised from 5 to 7)
-    oi_collapse_threshold: float = -7.0   # % change (negative)
+    # Open Interest (default for TIER_2)
+    oi_explosion_threshold: float = 4.0
+    oi_collapse_threshold: float = -10.0  # FAS V2: -10%
     oi_divergence_threshold: float = 3.0
     
-    # CVD
-    cvd_divergence_threshold: float = 5.0
-    price_change_min_cvd: float = 1.0  # %
+    # Liquidations (default for TIER_2)
+    liq_ratio_threshold: float = 0.025
+    
+    # CVD (FAS V2 optimized values)
+    cvd_divergence_threshold: float = 3.0  # FAS V2: 3.0
+    price_change_min_cvd: float = 2.0  # FAS V2: 2.0%
     
     # Funding
     funding_extreme_threshold: float = 0.001  # 0.1%
@@ -65,16 +68,41 @@ class PatternThresholds:
     # RSI
     rsi_overbought: float = 70.0
     rsi_oversold: float = 30.0
-    rsi_extreme_overbought: float = 80.0
-    rsi_extreme_oversold: float = 20.0
+    rsi_extreme_overbought: float = 70.0  # FAS V2: 70
+    rsi_extreme_oversold: float = 30.0    # FAS V2: 30
     
-    # Liquidations (FAS V2: ratio-based)
-    liq_ratio_threshold: float = 0.03  # 3% of volume
+    # Accumulation/Distribution (FAS V2 Phase 1-2 optimized)
+    sideways_price_range: float = 0.8  # FAS V2: ±0.8% max price change
+    accum_cvd_threshold: float = 0.35  # FAS V2: normalized_imbalance > 0.35
+    accum_volume_threshold: float = 2.0  # FAS V2: buy > sell * 2.0
     
-    # Accumulation/Distribution (sideways range)
-    sideways_price_range: float = 1.0  # % max price change for sideways
-    accum_cvd_threshold: float = 0.1   # Positive CVD change
-    accum_volume_threshold: float = 1.5  # Volume Z-score min
+    @classmethod
+    def for_tier(cls, tier: str) -> 'PatternThresholds':
+        """
+        Get tier-adjusted thresholds (FAS V2 parity).
+        
+        TIER_1 (BTC, ETH): Lower thresholds - high liquidity, less noise
+        TIER_2 (mid-caps): Medium thresholds
+        TIER_3 (low-caps): Higher thresholds - more volatility
+        """
+        if tier == 'TIER_1':
+            return cls(
+                volume_zscore_threshold=2.5,
+                oi_explosion_threshold=3.0,
+                liq_ratio_threshold=0.02,
+            )
+        elif tier == 'TIER_2':
+            return cls(
+                volume_zscore_threshold=3.0,
+                oi_explosion_threshold=4.0,
+                liq_ratio_threshold=0.025,
+            )
+        else:  # TIER_3+
+            return cls(
+                volume_zscore_threshold=3.5,
+                oi_explosion_threshold=5.0,
+                liq_ratio_threshold=0.03,
+            )
 
 
 class PatternDetector:
@@ -162,6 +190,35 @@ class PatternDetector:
         
         # 12. Smart Money Divergence (NEW: FAS V2)
         p = self._detect_smart_money_divergence(indicators)
+        if p:
+            patterns.append(p)
+        
+        # 13. OI Divergence
+        if prev_indicators:
+            p = self._detect_oi_divergence(indicators, prev_indicators)
+            if p:
+                patterns.append(p)
+        
+        # 14. Funding Flip
+        prev_funding = prev_indicators.get('funding_rate') if prev_indicators else None
+        p = self._detect_funding_flip(pair_data, prev_funding)
+        if p:
+            patterns.append(p)
+        
+        # 15. RSI Divergence
+        if prev_indicators:
+            p = self._detect_rsi_divergence(indicators, prev_indicators)
+            if p:
+                patterns.append(p)
+        
+        # 16. MACD Divergence
+        if prev_indicators:
+            p = self._detect_macd_divergence(indicators, prev_indicators)
+            if p:
+                patterns.append(p)
+        
+        # 17. Squeeze Ignition
+        p = self._detect_squeeze_ignition(indicators, pair_data)
         if p:
             patterns.append(p)
         
@@ -280,28 +337,56 @@ class PatternDetector:
         )
     
     def _detect_funding_extreme(self, pair_data) -> Optional[Pattern]:
-        """Detect extreme funding rate"""
+        """
+        Detect extreme funding rate (FAS V2 FUNDING_DIVERGENCE logic).
+        
+        Multi-level thresholds:
+        - funding < -0.001: Strong short squeeze (+70)
+        - funding < -0.0005: Moderate short squeeze (+50)
+        - funding > +0.001: Long squeeze potential (-50)
+        """
         rate = pair_data.latest_funding_rate
-        threshold = self.thresholds.funding_extreme_threshold
         
-        if abs(rate) <= threshold:
-            return None
+        # Strong short squeeze (very bullish)
+        if rate < -0.001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=70.0,
+                confidence=90,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'STRONG_SHORT_SQUEEZE',
+                    'direction': 'BULLISH',
+                }
+            )
         
-        # High positive = many longs = bearish
-        # High negative = many shorts = bullish
-        score = -20.0 if rate > 0 else 20.0
-        confidence = min(50 + abs(rate) / threshold * 20, 85)
+        # Moderate short squeeze
+        if rate < -0.0005:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=50.0,
+                confidence=80,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'SHORT_SQUEEZE',
+                    'direction': 'BULLISH',
+                }
+            )
         
-        return Pattern(
-            pattern_type=PatternType.FUNDING_EXTREME,
-            score=score,
-            confidence=confidence,
-            details={
-                'funding_rate': rate,
-                'threshold': threshold,
-                'direction': 'HIGH_LONGS' if rate > 0 else 'HIGH_SHORTS',
-            }
-        )
+        # Long squeeze potential (bearish)
+        if rate > 0.001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=-50.0,
+                confidence=80,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'LONG_SQUEEZE_POTENTIAL',
+                    'direction': 'BEARISH',
+                }
+            )
+        
+        return None
     
     def _detect_rsi_extreme(self, indicators) -> Optional[Pattern]:
         """Detect RSI at extreme levels"""
@@ -504,29 +589,39 @@ class PatternDetector:
     
     def _detect_momentum_exhaustion(self, indicators, pair_data) -> Optional[Pattern]:
         """
-        Detect momentum exhaustion:
-        - RSI at extreme (overbought/oversold)
-        - MACD showing divergence (histogram decreasing magnitude)
+        Detect momentum exhaustion (FAS V2 logic):
+        - RSI at extreme (>70 or <30)
+        - Price stalled (small change)
+        - Low volume (negative z-score)
         """
-        if indicators.rsi is None or indicators.macd_histogram is None:
-            return None
-        if pair_data.prev_macd_histogram is None:
+        if indicators.rsi is None or indicators.volume_zscore is None:
             return None
         
         rsi = indicators.rsi
-        macd_now = abs(indicators.macd_histogram)
-        macd_prev = abs(pair_data.prev_macd_histogram)
+        price_change = indicators.price_change_pct if indicators.price_change_pct else 0
+        volume_zscore = indicators.volume_zscore
         
-        # Overbought + momentum fading = bearish exhaustion
-        if rsi > self.thresholds.rsi_overbought and macd_now < macd_prev * 0.8:
-            score = -30.0
-            confidence = min(60 + (rsi - 70) * 2, 85)
-            direction = 'BEARISH_EXHAUSTION'
-        # Oversold + momentum fading = bullish exhaustion (reversal signal)
-        elif rsi < self.thresholds.rsi_oversold and macd_now < macd_prev * 0.8:
-            score = 30.0
-            confidence = min(60 + (30 - rsi) * 2, 85)
-            direction = 'BULLISH_EXHAUSTION'
+        # FAS V2 conditions
+        overbought_exhaustion = (
+            rsi > 70 and 
+            price_change < 0.5 and 
+            volume_zscore < -1
+        )
+        
+        oversold_exhaustion = (
+            rsi < 30 and 
+            price_change > -0.5 and 
+            volume_zscore < -1
+        )
+        
+        if overbought_exhaustion:
+            score = -40.0  # Bearish reversal
+            direction = 'OVERBOUGHT'
+            confidence = min(70 + (rsi - 70), 90)
+        elif oversold_exhaustion:
+            score = 40.0   # Bullish reversal
+            direction = 'OVERSOLD'
+            confidence = min(70 + (30 - rsi), 90)
         else:
             return None
         
@@ -536,17 +631,17 @@ class PatternDetector:
             confidence=confidence,
             details={
                 'rsi': rsi,
-                'macd_histogram': indicators.macd_histogram,
-                'prev_macd_histogram': pair_data.prev_macd_histogram,
-                'direction': direction,
+                'price_change': price_change,
+                'volume_zscore': volume_zscore,
+                'exhaustion_type': direction,
             }
         )
 
     def _detect_smart_money_divergence(self, indicators) -> Optional[Pattern]:
         """
         Detect Smart Money Divergence (FAS V2 parity):
-        - OI increasing (+3%) while price decreasing (-1%) → shorts accumulating
-        - OI decreasing (-3%) while price increasing (+1%) → longs closing
+        - OI increasing while price decreasing → smart money accumulating = BULLISH
+        - OI decreasing while price increasing → smart money distributing = BEARISH
         """
         if indicators.oi_delta_pct is None or indicators.price_change_pct is None:
             return None
@@ -554,37 +649,208 @@ class PatternDetector:
         oi_delta = indicators.oi_delta_pct
         price_change = indicators.price_change_pct
         
-        # OI up, price down → Smart money shorts accumulating
+        # OI up, price down → Smart money accumulating = BULLISH (FAS V2)
         if oi_delta > 3.0 and price_change < -1.0:
-            score = 40.0  # Bearish signal
-            direction = 'SHORT'
-            confidence = min(90, 70 + abs(oi_delta) + abs(price_change))
-            
             return Pattern(
                 pattern_type=PatternType.SMART_MONEY_DIVERGENCE,
-                score=-score,  # Negative for SHORT
-                confidence=confidence,
+                score=40.0,  # BULLISH - accumulation
+                confidence=min(65 + abs(oi_delta) * 3, 85),
                 details={
                     'oi_delta_pct': oi_delta,
                     'price_change_pct': price_change,
-                    'direction': direction,
+                    'divergence_type': 'BULLISH',
                 }
             )
         
-        # OI down, price up → Smart money longs closing
+        # OI down, price up → Smart money distributing = BEARISH (FAS V2)
         if oi_delta < -3.0 and price_change > 1.0:
-            score = 40.0  # Bullish reversal signal
-            direction = 'LONG'
-            confidence = min(90, 70 + abs(oi_delta) + abs(price_change))
-            
             return Pattern(
                 pattern_type=PatternType.SMART_MONEY_DIVERGENCE,
-                score=score,  # Positive for LONG
-                confidence=confidence,
+                score=-40.0,  # BEARISH - distribution
+                confidence=min(65 + abs(oi_delta) * 3, 85),
                 details={
                     'oi_delta_pct': oi_delta,
                     'price_change_pct': price_change,
-                    'direction': direction,
+                    'divergence_type': 'BEARISH',
+                }
+            )
+        
+        return None
+    
+    def _detect_oi_divergence(self, indicators, prev_indicators) -> Optional[Pattern]:
+        """
+        Detect OI-Price Divergence:
+        - OI rising while price falling = bearish divergence
+        - OI falling while price rising = bullish divergence
+        """
+        if prev_indicators is None:
+            return None
+        if indicators.oi_delta_pct is None or indicators.price_change_pct is None:
+            return None
+        
+        oi_delta = indicators.oi_delta_pct
+        price_change = indicators.price_change_pct
+        
+        # OI up + price down = bearish
+        if oi_delta > self.thresholds.oi_divergence_threshold and price_change < -0.5:
+            return Pattern(
+                pattern_type=PatternType.OI_DIVERGENCE,
+                score=-25.0,
+                confidence=min(85, 65 + abs(oi_delta)),
+                details={'oi_delta': oi_delta, 'price_change': price_change, 'direction': 'BEARISH'}
+            )
+        
+        # OI down + price up = bullish divergence
+        if oi_delta < -self.thresholds.oi_divergence_threshold and price_change > 0.5:
+            return Pattern(
+                pattern_type=PatternType.OI_DIVERGENCE,
+                score=25.0,
+                confidence=min(85, 65 + abs(oi_delta)),
+                details={'oi_delta': oi_delta, 'price_change': price_change, 'direction': 'BULLISH'}
+            )
+        
+        return None
+    
+    def _detect_funding_flip(self, pair_data, prev_funding: Optional[float] = None) -> Optional[Pattern]:
+        """
+        Detect Funding Rate Flip (sign change):
+        - Negative to Positive = bullish
+        - Positive to Negative = bearish
+        """
+        current_funding = pair_data.latest_funding_rate
+        if current_funding is None or prev_funding is None:
+            return None
+        
+        # Positive to Negative flip (bearish)
+        if prev_funding > 0.0001 and current_funding < -0.0001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_FLIP,
+                score=-20.0,
+                confidence=75,
+                details={'prev_funding': prev_funding, 'current_funding': current_funding, 'direction': 'BEARISH'}
+            )
+        
+        # Negative to Positive flip (bullish)
+        if prev_funding < -0.0001 and current_funding > 0.0001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_FLIP,
+                score=20.0,
+                confidence=75,
+                details={'prev_funding': prev_funding, 'current_funding': current_funding, 'direction': 'BULLISH'}
+            )
+        
+        return None
+    
+    def _detect_rsi_divergence(self, indicators, prev_indicators) -> Optional[Pattern]:
+        """
+        Detect RSI Divergence:
+        - Price higher high + RSI lower high = bearish divergence
+        - Price lower low + RSI higher low = bullish divergence
+        """
+        if prev_indicators is None:
+            return None
+        if indicators.rsi is None or indicators.price_change_pct is None:
+            return None
+        
+        prev_rsi = prev_indicators.get('rsi')
+        if prev_rsi is None:
+            return None
+        
+        current_rsi = indicators.rsi
+        price_change = indicators.price_change_pct
+        
+        # Price up but RSI down = bearish divergence
+        if price_change > 1.0 and current_rsi < prev_rsi - 5:
+            return Pattern(
+                pattern_type=PatternType.RSI_DIVERGENCE,
+                score=-20.0,
+                confidence=70,
+                details={'rsi': current_rsi, 'prev_rsi': prev_rsi, 'price_change': price_change, 'type': 'BEARISH'}
+            )
+        
+        # Price down but RSI up = bullish divergence
+        if price_change < -1.0 and current_rsi > prev_rsi + 5:
+            return Pattern(
+                pattern_type=PatternType.RSI_DIVERGENCE,
+                score=20.0,
+                confidence=70,
+                details={'rsi': current_rsi, 'prev_rsi': prev_rsi, 'price_change': price_change, 'type': 'BULLISH'}
+            )
+        
+        return None
+    
+    def _detect_macd_divergence(self, indicators, prev_indicators) -> Optional[Pattern]:
+        """
+        Detect MACD Divergence:
+        - Price higher high + MACD histogram lower = bearish
+        - Price lower low + MACD histogram higher = bullish
+        """
+        if prev_indicators is None:
+            return None
+        if indicators.macd_histogram is None or indicators.price_change_pct is None:
+            return None
+        
+        prev_hist = prev_indicators.get('macd_histogram')
+        if prev_hist is None:
+            return None
+        
+        current_hist = indicators.macd_histogram
+        price_change = indicators.price_change_pct
+        
+        # Price up but histogram weakening = bearish divergence
+        if price_change > 1.0 and current_hist < prev_hist and current_hist > 0:
+            return Pattern(
+                pattern_type=PatternType.MACD_DIVERGENCE,
+                score=-15.0,
+                confidence=65,
+                details={'histogram': current_hist, 'prev_histogram': prev_hist, 'type': 'BEARISH'}
+            )
+        
+        # Price down but histogram strengthening = bullish divergence  
+        if price_change < -1.0 and current_hist > prev_hist and current_hist < 0:
+            return Pattern(
+                pattern_type=PatternType.MACD_DIVERGENCE,
+                score=15.0,
+                confidence=65,
+                details={'histogram': current_hist, 'prev_histogram': prev_hist, 'type': 'BULLISH'}
+            )
+        
+        return None
+    
+    def _detect_squeeze_ignition(self, indicators, pair_data) -> Optional[Pattern]:
+        """
+        Detect Squeeze Ignition (FAS V2):
+        - Price change > 2%
+        - Volume zscore > 3
+        - Funding rate < -0.0003 (shorts squeezed)
+        - OI delta > 2%
+        """
+        if indicators.volume_zscore is None or indicators.price_change_pct is None:
+            return None
+        
+        volume_zscore = indicators.volume_zscore
+        price_change = indicators.price_change_pct
+        funding_rate = pair_data.latest_funding_rate
+        oi_delta = indicators.oi_delta_pct if indicators.oi_delta_pct else 0
+        
+        # FAS V2 conditions (short squeeze)
+        if (price_change > 2.0 and 
+            volume_zscore > 3.0 and 
+            funding_rate < -0.0003 and 
+            oi_delta > 2.0):
+            
+            confidence = min(70 + abs(funding_rate * 10000), 90)
+            
+            return Pattern(
+                pattern_type=PatternType.SQUEEZE_IGNITION,
+                score=50.0,  # Always bullish (short squeeze)
+                confidence=confidence,
+                details={
+                    'price_change': price_change,
+                    'volume_zscore': volume_zscore,
+                    'funding_rate': funding_rate,
+                    'oi_delta': oi_delta,
+                    'squeeze_type': 'SHORT_SQUEEZE'
                 }
             )
         
@@ -602,6 +868,75 @@ def calculate_total_score(patterns: List[Pattern]) -> tuple[float, str, float]:
     
     total_score = sum(p.score for p in patterns)
     avg_confidence = sum(p.confidence for p in patterns) / len(patterns)
+    
+    if total_score > 10:
+        direction = 'LONG'
+    elif total_score < -10:
+        direction = 'SHORT'
+    else:
+        direction = 'NEUTRAL'
+    
+    return (total_score, direction, avg_confidence)
+
+
+def detect_htf_patterns(
+    detector: PatternDetector,
+    pair_data,
+    htf_indicators: dict  # {'1h': IndicatorResult, '4h': ..., '1d': ...}
+) -> List[Pattern]:
+    """
+    Detect patterns from higher timeframe indicators.
+    Only returns high-impact patterns (|score| >= 10) matching FAS V2 logic.
+    
+    Args:
+        detector: PatternDetector instance
+        pair_data: PairData with HTF candles
+        htf_indicators: Dict mapping timeframe to IndicatorResult
+    
+    Returns:
+        List of high-impact patterns from all HTFs
+    """
+    htf_patterns = []
+    
+    for timeframe, indicators in htf_indicators.items():
+        if indicators is None:
+            continue
+        
+        # Detect patterns using existing methods
+        patterns = detector.detect_all(indicators, pair_data)
+        
+        # Add timeframe tag and filter by score >= 10 (FAS V2 rule)
+        for p in patterns:
+            if abs(p.score) >= 10:
+                p.details['timeframe'] = timeframe
+                htf_patterns.append(p)
+    
+    return htf_patterns
+
+
+def calculate_multi_tf_score(
+    base_patterns: List[Pattern],  # 15m patterns
+    htf_patterns: List[Pattern],   # 1h/4h/1d patterns with |score| >= 10
+    base_indicator_score: float = 0.0
+) -> tuple[float, str, float]:
+    """
+    Calculate combined score from 15m patterns + HTF patterns.
+    Matches FAS V2 calculate_realtime_scores_v2 logic.
+    
+    total_score = pattern_score + indicator_score
+    pattern_score = sum(15m patterns) + sum(HTF patterns with |score| >= 10)
+    
+    Returns:
+        Tuple of (total_score, direction, avg_confidence)
+    """
+    all_patterns = base_patterns + htf_patterns
+    
+    if not all_patterns:
+        return (base_indicator_score, 'NEUTRAL', 0.0)
+    
+    pattern_score = sum(p.score for p in all_patterns)
+    total_score = pattern_score + base_indicator_score
+    avg_confidence = sum(p.confidence for p in all_patterns) / len(all_patterns)
     
     if total_score > 10:
         direction = 'LONG'

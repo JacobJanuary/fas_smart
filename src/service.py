@@ -16,8 +16,8 @@ from ws.connection import BinanceWSManager, ConnectionConfig
 from ws.handlers import MessageRouter
 from ws.storage import DataStore
 from ws.rest_poller import OpenInterestPoller
-from calc.indicators import calculate_all_indicators, calculate_indicator_score
-from calc.patterns import PatternDetector, calculate_total_score
+from calc.indicators import calculate_all_indicators, calculate_indicator_score, calculate_htf_indicators
+from calc.patterns import PatternDetector, calculate_total_score, detect_htf_patterns, calculate_multi_tf_score
 from calc.market_regime import calculate_market_regime, adjust_score_for_regime
 from warmup import WarmupManager
 
@@ -75,7 +75,7 @@ class FASService:
         
         self.ws_manager = BinanceWSManager(
             symbols=symbols,
-            stream_types=['kline_1m', 'forceOrder', 'markPrice'],
+            stream_types=['kline_1m', 'kline_1h', 'kline_4h', 'kline_1d', 'forceOrder', 'markPrice'],
             message_callback=self.message_router.handle_message,
             config=ws_config,
         )
@@ -223,11 +223,21 @@ class FASService:
         # Get previous indicators for pattern detection
         prev = self._prev_indicators.get(symbol, {})
         
-        # Detect patterns
-        patterns = self.pattern_detector.detect_all(indicators, pair_data, prev)
+        # Use tier-based thresholds (FAS V2 parity)
+        from calc.patterns import PatternThresholds
+        thresholds = PatternThresholds.for_tier(pair_data.tier)
+        tier_detector = PatternDetector(thresholds)
         
-        # Calculate pattern score
-        pattern_score, direction, confidence = calculate_total_score(patterns)
+        # Detect 15m patterns with tier-adjusted thresholds
+        patterns = tier_detector.detect_all(indicators, pair_data, prev)
+        
+        # Calculate HTF indicators and detect HTF patterns (FAS V2 multi-TF)
+        htf_indicators = {
+            tf: calculate_htf_indicators(pair_data, tf)
+            for tf in ['1h', '4h', '1d']
+            if pair_data.htf_candle_count.get(tf, 0) >= 35  # Need 35 for MACD
+        }
+        htf_patterns = detect_htf_patterns(self.pattern_detector, pair_data, htf_indicators)
         
         # Calculate indicator score (FAS V2 parity)
         indicator_score = calculate_indicator_score(indicators, pair_data)
@@ -241,8 +251,8 @@ class FASService:
             if symbol == 'BTCUSDT':
                 logger.debug(f"Market regime: {regime.regime} (str={regime.strength:.2f}, btc_4h={regime.btc_change_4h:.2f}%)")
         
-        # Total score = pattern_score + indicator_score (matching FAS V2)
-        total_score = pattern_score + indicator_score
+        # Total score = 15m patterns + HTF patterns (|score|>=10) + indicator_score (FAS V2 parity)
+        total_score, direction, confidence = calculate_multi_tf_score(patterns, htf_patterns, indicator_score)
         
         # Adjust direction based on total score
         if total_score > 10:
@@ -254,7 +264,7 @@ class FASService:
         
         # Log patterns for debugging
         if symbol == 'BTCUSDT':
-            logger.debug(f"BTCUSDT: patterns={len(patterns)}, p_score={pattern_score:.1f}, i_score={indicator_score:.1f}, total={total_score:.1f}")
+            logger.debug(f"BTCUSDT: 15m_patterns={len(patterns)}, htf_patterns={len(htf_patterns)}, i_score={indicator_score:.1f}, total={total_score:.1f}")
         
         # Store current indicators for next iteration
         self._prev_indicators[symbol] = {

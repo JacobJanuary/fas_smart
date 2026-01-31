@@ -50,6 +50,16 @@ class ThresholdConfig:
     # Tier boundaries
     TIER_1_VOLUME: float = 100_000_000  # >$100M
     TIER_2_VOLUME: float = 10_000_000   # >$10M
+    
+    @staticmethod
+    def get_tier(volume_24h: float) -> str:
+        """Determine liquidity tier based on 24h volume (FAS V2 parity)."""
+        if volume_24h >= ThresholdConfig.TIER_1_VOLUME:
+            return 'TIER_1'
+        elif volume_24h >= ThresholdConfig.TIER_2_VOLUME:
+            return 'TIER_2'
+        else:
+            return 'TIER_3'
 
 
 class IPv6Config:
