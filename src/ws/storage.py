@@ -319,19 +319,19 @@ class DataStore:
         return True
     
     async def add_liquidation(self, liquidation) -> bool:
-        """Add liquidation to current minute accumulator"""
+        """Add liquidation to current 15m candle accumulator (FAS V2 parity)"""
         symbol = liquidation.symbol
         if symbol not in self.pairs:
             return False
         
         pair_data = self.pairs[symbol]
         
-        # Reset accumulator if minute changed
-        current_minute = liquidation.timestamp // 60000 * 60000
-        if current_minute != pair_data.liq_last_reset:
+        # Reset accumulator if 15m candle changed (FAS V2 uses 15m aggregated data)
+        current_15m = liquidation.timestamp // 900000 * 900000  # 900000ms = 15 minutes
+        if current_15m != pair_data.liq_last_reset:
             pair_data.liq_long_current = 0.0
             pair_data.liq_short_current = 0.0
-            pair_data.liq_last_reset = current_minute
+            pair_data.liq_last_reset = current_15m
         
         if liquidation.side == 'L':
             pair_data.liq_long_current += liquidation.quantity
