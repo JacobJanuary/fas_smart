@@ -75,7 +75,7 @@ class FASService:
         
         self.ws_manager = BinanceWSManager(
             symbols=symbols,
-            stream_types=['kline_1m', 'kline_1h', 'kline_4h', 'kline_1d', 'forceOrder', 'markPrice'],
+            stream_types=['kline_1m', 'forceOrder', 'markPrice'],  # HTF via warmup REST API
             message_callback=self.message_router.handle_message,
             config=ws_config,
         )
