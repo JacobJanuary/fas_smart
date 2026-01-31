@@ -108,7 +108,17 @@ class FASService:
             success = await self._warmup_manager.run_warmup()
             self._warmup_complete = success
             if success:
-                logger.info("Warmup complete, full signal generation enabled")
+                # Get stats for the announcement
+                total_pairs = len(self.data_store.pairs)
+                pairs_with_data = sum(1 for p in self.data_store.pairs.values() if len(p.candles_1m) > 0)
+                logger.info("")
+                logger.info("=" * 60)
+                logger.info("🚀 WARMUP COMPLETE - SIGNAL GENERATION STARTING!")
+                logger.info(f"   ✅ {pairs_with_data}/{total_pairs} pairs loaded with historical data")
+                logger.info(f"   ✅ Indicators calculated and ready")
+                logger.info(f"   ✅ Pattern detection active")
+                logger.info("=" * 60)
+                logger.info("")
         except Exception as e:
             logger.error(f"Warmup failed: {e}")
     
@@ -198,6 +208,11 @@ class FASService:
                 
                 if not self._running:
                     break
+                
+                # Skip signal generation if warmup not complete
+                if not self._warmup_complete:
+                    logger.info("⏳ Warming up... signal generation paused")
+                    continue
                 
                 # Run calculations
                 start_time = datetime.now(timezone.utc)
