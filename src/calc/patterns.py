@@ -886,15 +886,28 @@ def detect_htf_patterns(
 ) -> List[Pattern]:
     """
     Detect patterns from higher timeframe indicators.
-    Only returns high-impact patterns (|score| >= 10) matching FAS V2 logic.
+    Only detects patterns that use HTF-specific indicator data.
+    
+    EXCLUDED patterns (use 15m pair_data, not HTF-specific):
+    - FUNDING_EXTREME: uses pair_data.latest_funding_rate (single 8h value)
+    - LIQUIDATION_CASCADE: uses pair_data.liq_*_current (15m aggregated)
+    - ACCUMULATION/DISTRIBUTION: uses 15m volume/cvd data
+    - FUNDING_FLIP: uses pair_data funding
+    
+    INCLUDED patterns (use IndicatorResult from HTF candles):
+    - VOLUME_ANOMALY: uses indicators.volume_zscore
+    - RSI_EXTREME: uses indicators.rsi
+    - CVD_DIVERGENCE: uses indicators.normalized_imbalance
+    - OI_EXPLOSION/COLLAPSE: uses indicators.oi_* (if available)
+    - SMART_MONEY_DIVERGENCE: uses indicators.oi_delta_pct
     
     Args:
         detector: PatternDetector instance
-        pair_data: PairData with HTF candles
+        pair_data: PairData (only used for thresholds, not 15m data)
         htf_indicators: Dict mapping timeframe to IndicatorResult
     
     Returns:
-        List of high-impact patterns from all HTFs
+        List of high-impact patterns from all HTFs (|score| >= 10)
     """
     htf_patterns = []
     
@@ -902,8 +915,38 @@ def detect_htf_patterns(
         if indicators is None:
             continue
         
-        # Detect patterns using existing methods
-        patterns = detector.detect_all(indicators, pair_data)
+        # Detect only HTF-appropriate patterns (indicator-based only)
+        patterns = []
+        
+        # VOLUME_ANOMALY - uses indicators.volume_zscore
+        p = detector._detect_volume_anomaly(indicators)
+        if p:
+            patterns.append(p)
+        
+        # RSI_EXTREME - uses indicators.rsi
+        p = detector._detect_rsi_extreme(indicators)
+        if p:
+            patterns.append(p)
+        
+        # CVD_DIVERGENCE - uses indicators.normalized_imbalance
+        p = detector._detect_cvd_divergence(indicators)
+        if p:
+            patterns.append(p)
+        
+        # OI_EXPLOSION - uses indicators.oi_explosion_pct
+        p = detector._detect_oi_explosion(indicators)
+        if p:
+            patterns.append(p)
+        
+        # OI_COLLAPSE - uses indicators.oi_collapse_pct  
+        p = detector._detect_oi_collapse(indicators)
+        if p:
+            patterns.append(p)
+        
+        # SMART_MONEY_DIVERGENCE - uses indicators.oi_delta_pct
+        p = detector._detect_smart_money_divergence(indicators)
+        if p:
+            patterns.append(p)
         
         # Add timeframe tag and filter by score >= 10 (FAS V2 rule)
         for p in patterns:
