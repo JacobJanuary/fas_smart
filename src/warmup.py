@@ -264,14 +264,17 @@ class WarmupManager:
                                     if retry == 1:
                                         action = await self._diagnose_symbol(session, gap['symbol'], gap['pair_id'])
                                         
-                                        if action == 'RETRY_NO_PROXY':
-                                            # Try without proxy as fallback
-                                            success = await self._fetch_klines_no_proxy(session, gap)
+                                        if action == 'RETRY_FALLBACK_PROXY':
+                                            # Force switch to fallback proxy (proxy.txt)
+                                            success = await self._fetch_klines_fallback_proxy(session, gap)
                                             if success:
                                                 return True
-                                        elif action == 'SKIP_NEW':
-                                            # Newly listed, skip warmup for this symbol
-                                            return None
+                                        elif action == 'FETCH_AVAILABLE':
+                                            # Newly listed - fetch whatever history is available
+                                            success = await self._fetch_klines_available(session, gap)
+                                            if success:
+                                                return True
+                                            return None  # Done, skip retries
                                         elif action == 'DEACTIVATE':
                                             # Already deactivated, skip
                                             return None
@@ -314,8 +317,8 @@ class WarmupManager:
         Check if symbol is valid/listed on Binance and take corrective action.
         
         Returns:
-            'RETRY_NO_PROXY' - Symbol valid, try without proxy
-            'SKIP_NEW' - Newly listed, not enough data
+            'RETRY_FALLBACK_PROXY' - Symbol valid, try with fallback proxy (proxy.txt)
+            'FETCH_AVAILABLE' - Newly listed, fetch whatever data is available
             'DEACTIVATE' - Delisted, mark inactive
             'RETRY' - Unknown issue, just retry
         """
@@ -326,11 +329,11 @@ class WarmupManager:
                 if resp.status == 200:
                     data = await resp.json()
                     if data:
-                        logger.info(f"🔍 DIAG {symbol}: Symbol valid, has data → switching to no-proxy")
-                        return 'RETRY_NO_PROXY'
+                        logger.info(f"🔍 DIAG {symbol}: Symbol valid, has data → trying fallback proxy")
+                        return 'RETRY_FALLBACK_PROXY'
                     else:
-                        logger.warning(f"🔍 DIAG {symbol}: Newly listed, no historical data → skipping warmup")
-                        return 'SKIP_NEW'
+                        logger.warning(f"🔍 DIAG {symbol}: Newly listed → fetching available history")
+                        return 'FETCH_AVAILABLE'
                 elif resp.status == 400:
                     error = await resp.json()
                     msg = error.get('msg', 'Unknown')
@@ -364,13 +367,26 @@ class WarmupManager:
         except Exception as e:
             logger.error(f"Failed to deactivate {symbol}: {e}")
     
-    async def _fetch_klines_no_proxy(self, session: aiohttp.ClientSession, gap: dict) -> bool:
-        """Fetch klines without proxy - fallback for proxy issues."""
+    async def _fetch_klines_fallback_proxy(self, session: aiohttp.ClientSession, gap: dict) -> bool:
+        """Fetch klines using fallback proxy from proxy.txt (not Decodo)."""
         try:
-            limit = min(gap['gap_minutes'], 1000)
-            url = f"{self.BINANCE_KLINES_URL}?symbol={gap['symbol']}&interval=1m&limit={limit}"
+            # Force fallback to proxy.txt
+            config.PROXY._decodo_disabled = True  # Temporarily disable Decodo
             
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+            limit = min(gap['gap_minutes'], 1000)
+            params = {
+                'symbol': gap['symbol'],
+                'interval': '1m',
+                'limit': limit
+            }
+            proxy_url = config.PROXY.get_rotating_url()
+            
+            async with session.get(
+                self.BINANCE_KLINES_URL, 
+                params=params,
+                proxy=proxy_url,
+                timeout=aiohttp.ClientTimeout(total=30)
+            ) as resp:
                 if resp.status == 200:
                     klines = await resp.json()
                     if klines:
@@ -392,16 +408,63 @@ class WarmupManager:
                                     volume, taker_buy
                                 ))
                                 inserted += 1
-                        logger.info(f"✅ {gap['symbol']}: filled {inserted} candles (no-proxy fallback)")
+                        logger.info(f"✅ {gap['symbol']}: filled {inserted} candles (fallback proxy)")
                         return True
-                elif resp.status == 451:
-                    logger.warning(f"🚫 {gap['symbol']}: IP blocked even without proxy")
-                    return False
                 else:
-                    logger.warning(f"❌ {gap['symbol']}: HTTP {resp.status} (no-proxy)")
+                    logger.warning(f"❌ {gap['symbol']}: HTTP {resp.status} (fallback proxy)")
                     return False
         except Exception as e:
-            logger.error(f"❌ {gap['symbol']}: no-proxy fetch failed: {e}")
+            logger.error(f"❌ {gap['symbol']}: fallback proxy failed: {e}")
+            return False
+        finally:
+            config.PROXY._decodo_disabled = False  # Re-enable Decodo
+    
+    async def _fetch_klines_available(self, session: aiohttp.ClientSession, gap: dict) -> bool:
+        """Fetch whatever klines are available for newly listed symbol."""
+        try:
+            # For new listings, try progressively smaller ranges
+            for limit in [500, 200, 100, 50]:
+                params = {
+                    'symbol': gap['symbol'],
+                    'interval': '1m',
+                    'limit': limit
+                }
+                proxy_url = config.PROXY.get_rotating_url()
+                
+                async with session.get(
+                    self.BINANCE_KLINES_URL,
+                    params=params,
+                    proxy=proxy_url,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status == 200:
+                        klines = await resp.json()
+                        if klines:
+                            inserted = 0
+                            with get_cursor() as cur:
+                                for k in klines:
+                                    ts = datetime.utcfromtimestamp(k[0] / 1000)
+                                    volume = float(k[5])
+                                    taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
+                                    
+                                    cur.execute("""
+                                        INSERT INTO fas_smart.candles_1m 
+                                        (pair_id, ts, o, h, l, c, v, bv)
+                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                        ON CONFLICT (pair_id, ts) DO NOTHING
+                                    """, (
+                                        gap['pair_id'], ts,
+                                        float(k[1]), float(k[2]), float(k[3]), float(k[4]),
+                                        volume, taker_buy
+                                    ))
+                                    inserted += 1
+                            logger.info(f"✅ {gap['symbol']}: filled {inserted}/{limit} candles (new listing)")
+                            return True
+            
+            logger.warning(f"⚠️ {gap['symbol']}: no data available yet (very new listing)")
+            return False
+        except Exception as e:
+            logger.error(f"❌ {gap['symbol']}: fetch available failed: {e}")
             return False
     
     async def fill_htf_gaps(self):
