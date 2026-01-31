@@ -648,14 +648,14 @@ class WarmupManager:
             
             # Update tier for each pair in data store
             updated = 0
-            for symbol, pair_data in self.data_store._pairs.items():
+            for symbol, pair_data in self.data_store.pairs.items():
                 vol_24h = volume_map.get(symbol, 0)
                 pair_data.tier = ThresholdConfig.get_tier(vol_24h)
                 updated += 1
             
             # Count tiers
             tier_counts = {'TIER_1': 0, 'TIER_2': 0, 'TIER_3': 0}
-            for pair_data in self.data_store._pairs.values():
+            for pair_data in self.data_store.pairs.values():
                 tier_counts[pair_data.tier] = tier_counts.get(pair_data.tier, 0) + 1
             
             logger.info(f"Updated tiers for {updated} pairs: {tier_counts}")
