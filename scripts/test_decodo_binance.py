@@ -23,6 +23,7 @@ KLINES_ENDPOINT = "/fapi/v1/klines"
 TEST_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
 PARALLEL_REQUESTS = 10
 RETRY_ATTEMPTS = 3
+CANDLE_LIMIT = 1000  # Max allowed by Binance
 
 
 def get_proxy_url(session_id: Optional[str] = None) -> str:
@@ -36,7 +37,7 @@ async def fetch_klines_with_proxy(
     session: aiohttp.ClientSession,
     symbol: str,
     interval: str = "1m",
-    limit: int = 100
+    limit: int = CANDLE_LIMIT
 ) -> dict:
     """Fetch klines via Decodo proxy - same logic as warmup.py"""
     url = f"{BINANCE_FAPI_BASE}{KLINES_ENDPOINT}"
