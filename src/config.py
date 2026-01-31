@@ -60,11 +60,35 @@ class IPv6Config:
     ENABLED: bool = bool(os.getenv('IPV6_ENABLED', ''))
 
 
+class ProxyConfig:
+    """Rotating proxy configuration for API rate limit bypass"""
+    # Proxy URL format: user-res-any-sid-{SESSION}:password@host:port
+    ENABLED: bool = bool(os.getenv('PROXY_ENABLED', ''))
+    HOST: str = os.getenv('PROXY_HOST', 'proxy-eu.proxy-cheap.com')
+    PORT: int = int(os.getenv('PROXY_PORT', '5959'))
+    USER: str = os.getenv('PROXY_USER', '')  # e.g., pceYcodHcK-res-any
+    PASSWORD: str = os.getenv('PROXY_PASSWORD', '')
+    
+    @classmethod
+    def get_rotating_url(cls, session_id: str = None) -> str:
+        """Get proxy URL with optional session ID for rotation."""
+        if not cls.ENABLED or not cls.USER:
+            return None
+        
+        # Add session ID to username for IP rotation
+        user = cls.USER
+        if session_id:
+            user = f"{cls.USER}-sid-{session_id}"
+        
+        return f"http://{user}:{cls.PASSWORD}@{cls.HOST}:{cls.PORT}"
+
+
 class Config:
     """Main configuration"""
     DB = DBConfig
     THRESHOLDS = ThresholdConfig
     IPV6 = IPv6Config
+    PROXY = ProxyConfig
     LOG_LEVEL: str = os.getenv('LOG_LEVEL', 'INFO')
     
     # Rolling window settings

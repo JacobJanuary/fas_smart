@@ -138,14 +138,19 @@ class WarmupManager:
             
         logger.info(f"Found {len(gaps_to_fill)} pairs with gaps, filling...")
         
-        # Fill gaps via Binance API with IPv6 rotation
-        if config.IPV6.ENABLED:
+        # Fill gaps via Binance API with rotation
+        if config.PROXY.ENABLED:
+            logger.info("Proxy rotation enabled, using rotating IPs per request")
+            # With proxy rotation - each request gets unique session ID = new IP
+            async with aiohttp.ClientSession() as session:
+                for gap in gaps_to_fill:
+                    await self._fetch_and_insert_klines_proxy(session, gap)
+        elif config.IPV6.ENABLED:
             logger.info("IPv6 rotation enabled, using random addresses per request")
-            # With IPv6 rotation, each request gets new IP - can parallelize more
             for gap in gaps_to_fill:
                 await self._fetch_and_insert_klines_ipv6(gap)
         else:
-            # Without IPv6 - use conservative rate limiting
+            # No rotation - use conservative rate limiting
             async with aiohttp.ClientSession() as session:
                 chunk_size = 20  # Smaller chunks without rotation
                 for i in range(0, len(gaps_to_fill), chunk_size):
@@ -219,6 +224,71 @@ class WarmupManager:
             
         except Exception as e:
             logger.error(f"Error filling gap for {gap['symbol']}: {e}")
+    
+    async def _fetch_and_insert_klines_proxy(
+        self, 
+        session: aiohttp.ClientSession, 
+        gap: dict
+    ):
+        """Fetch klines via rotating proxy - new IP per request."""
+        try:
+            limit = min(gap['gap_minutes'], self.MAX_KLINES_PER_REQUEST)
+            
+            params = {
+                'symbol': gap['symbol'],
+                'interval': '1m',
+                'limit': limit
+            }
+            
+            # Generate unique session ID for IP rotation
+            session_id = f"{gap['symbol']}{random.randint(10000, 99999)}"
+            proxy_url = config.PROXY.get_rotating_url(session_id)
+            
+            async with session.get(
+                self.BINANCE_KLINES_URL, 
+                params=params,
+                proxy=proxy_url,
+                timeout=15
+            ) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Failed to fetch {gap['symbol']}: {resp.status}")
+                    return
+                    
+                klines = await resp.json()
+            
+            if not klines:
+                return
+                
+            # Insert to DB
+            with get_cursor() as cur:
+                for k in klines:
+                    ts = datetime.utcfromtimestamp(k[0] / 1000)
+                    if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
+                        continue
+                        
+                    volume = float(k[5])
+                    taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
+                    
+                    cur.execute("""
+                        INSERT INTO fas_smart.candles_1m 
+                        (pair_id, ts, open, high, low, close, volume, buy_volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (pair_id, ts) DO NOTHING
+                    """, (
+                        gap['pair_id'],
+                        ts,
+                        float(k[1]),
+                        float(k[2]),
+                        float(k[3]),
+                        float(k[4]),
+                        volume,
+                        taker_buy
+                    ))
+                    
+            logger.debug(f"Filled {len(klines)} candles for {gap['symbol']} via proxy")
+            
+        except Exception as e:
+            logger.error(f"Error filling gap for {gap['symbol']} with proxy: {e}")
     
     async def _fetch_and_insert_klines_ipv6(self, gap: dict):
         """Fetch klines with IPv6 rotation - new address per request."""
