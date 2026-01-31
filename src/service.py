@@ -96,6 +96,10 @@ class FASService:
         self._running = True
         self._calculation_task = asyncio.create_task(self._calculation_loop())
         
+        # 7. Start periodic update tasks
+        self._tier_update_task = asyncio.create_task(self._periodic_tier_update())
+        self._pair_refresh_task = asyncio.create_task(self._periodic_pair_refresh())
+        
         logger.info(f"FAS Smart Service started with {len(symbols)} pairs")
     
     async def _run_warmup(self):
@@ -127,6 +131,39 @@ class FASService:
             await self.ws_manager.stop()
         
         logger.info("FAS Smart Service stopped")
+    
+    async def _periodic_tier_update(self):
+        """Update liquidity tiers every 4 hours."""
+        TIER_UPDATE_INTERVAL = 4 * 60 * 60  # 4 hours
+        
+        while self._running:
+            await asyncio.sleep(TIER_UPDATE_INTERVAL)
+            try:
+                logger.info("Running periodic tier update...")
+                await self._warmup_manager.update_tiers()
+            except Exception as e:
+                logger.warning(f"Periodic tier update failed: {e}")
+    
+    async def _periodic_pair_refresh(self):
+        """Check for new trading pairs every 24 hours."""
+        PAIR_REFRESH_INTERVAL = 24 * 60 * 60  # 24 hours
+        
+        while self._running:
+            await asyncio.sleep(PAIR_REFRESH_INTERVAL)
+            try:
+                logger.info("Checking for new trading pairs...")
+                current_pairs = set(self.data_store.pairs.keys())
+                db_pairs = self._load_pairs()
+                new_pairs = [(pid, sym) for pid, sym in db_pairs if sym not in current_pairs]
+                
+                if new_pairs:
+                    logger.info(f"Found {len(new_pairs)} new pairs, registering...")
+                    self.data_store.register_pairs_from_db(new_pairs)
+                    # TODO: Add new pairs to WebSocket subscriptions
+                else:
+                    logger.info("No new pairs found")
+            except Exception as e:
+                logger.warning(f"Periodic pair refresh failed: {e}")
     
     def _load_pairs(self) -> list[tuple[int, str]]:
         """Load active trading pairs from database"""
