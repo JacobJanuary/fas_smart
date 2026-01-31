@@ -157,9 +157,20 @@ class FASService:
                 new_pairs = [(pid, sym) for pid, sym in db_pairs if sym not in current_pairs]
                 
                 if new_pairs:
-                    logger.info(f"Found {len(new_pairs)} new pairs, registering...")
+                    logger.info(f"Found {len(new_pairs)} new pairs, integrating...")
+                    
+                    # 1. Register in DataStore
                     self.data_store.register_pairs_from_db(new_pairs)
-                    # TODO: Add new pairs to WebSocket subscriptions
+                    
+                    # 2. Add to WebSocket subscriptions
+                    new_symbols = [sym for _, sym in new_pairs]
+                    await self.ws_manager.add_symbols(new_symbols)
+                    
+                    # 3. Run warmup for new pairs (load historical data)
+                    logger.info(f"Running warmup for {len(new_pairs)} new pairs...")
+                    await self._warmup_manager.warmup_symbols(new_symbols)
+                    
+                    logger.info(f"Successfully integrated {len(new_pairs)} new pairs")
                 else:
                     logger.info("No new pairs found")
             except Exception as e:

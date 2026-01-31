@@ -277,6 +277,35 @@ class BinanceWSManager:
         
         logger.info("BinanceWSManager stopped")
     
+    async def add_symbols(self, symbols: list[str]):
+        """Add new symbols to WebSocket subscriptions dynamically."""
+        if not symbols:
+            return
+        
+        # Build new streams for the symbols
+        new_streams: list[StreamConfig] = []
+        for symbol in symbols:
+            for stream_type in self.stream_types:
+                new_streams.append(StreamConfig(symbol=symbol, stream_type=stream_type))
+        
+        logger.info(f"Adding {len(new_streams)} new streams for {len(symbols)} symbols...")
+        
+        # For simplicity, create a new connection for new streams
+        # (Could optimize later to fill existing connections)
+        if new_streams:
+            conn_id = len(self.connections)
+            conn = BinanceWSConnection(
+                connection_id=conn_id,
+                streams=new_streams,
+                message_callback=self.message_callback,
+                config=self.config,
+            )
+            self.connections.append(conn)
+            await conn.start()
+            
+            self.symbols.extend(symbols)
+            logger.info(f"Added connection WS-{conn_id} with {len(new_streams)} streams")
+    
     @property
     def stats(self) -> dict:
         """Get connection statistics"""

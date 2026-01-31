@@ -103,6 +103,88 @@ class WarmupManager:
             logger.error(f"Warmup failed: {e}", exc_info=True)
             return False
     
+    async def warmup_symbols(self, symbols: list[str]):
+        """Run warmup for specific symbols (for newly added pairs)."""
+        logger.info(f"Running targeted warmup for {len(symbols)} symbols...")
+        
+        try:
+            # Update tiers for new symbols
+            await self.update_tiers()
+            
+            # Fill gaps for these specific symbols
+            gaps = await self._detect_gaps_for_symbols(symbols)
+            if gaps:
+                logger.info(f"Found {len(gaps)} gaps to fill for new symbols")
+                await self._fill_gaps_batch(gaps)
+            
+            # Load history for new symbols
+            await self._load_history_for_symbols(symbols)
+            
+            logger.info(f"Completed warmup for {len(symbols)} new symbols")
+        except Exception as e:
+            logger.warning(f"Warmup for new symbols failed: {e}")
+    
+    async def _detect_gaps_for_symbols(self, symbols: list[str]) -> list[dict]:
+        """Detect gaps for specific symbols."""
+        gaps = []
+        with get_cursor() as cur:
+            for symbol in symbols:
+                cur.execute("""
+                    SELECT 
+                        tp.id as pair_id,
+                        tp.symbol,
+                        c.last_ts,
+                        EXTRACT(EPOCH FROM (NOW() - COALESCE(c.last_ts, NOW() - INTERVAL '500 minutes'))) / 60 as gap_minutes
+                    FROM fas_smart.trading_pairs tp
+                    LEFT JOIN LATERAL (
+                        SELECT MAX(ts) as last_ts 
+                        FROM fas_smart.candles_1m 
+                        WHERE pair_id = tp.id
+                    ) c ON true
+                    WHERE tp.symbol = %s AND tp.is_active = true
+                """, (symbol,))
+                row = cur.fetchone()
+                if row and row[3] > 1:
+                    gaps.append({
+                        'pair_id': row[0],
+                        'symbol': row[1],
+                        'last_ts': row[2],
+                        'gap_minutes': int(row[3])
+                    })
+        return gaps
+    
+    async def _load_history_for_symbols(self, symbols: list[str]):
+        """Load history from DB to memory for specific symbols."""
+        logger.info(f"Loading history for {len(symbols)} symbols...")
+        
+        with get_cursor() as cur:
+            for symbol in symbols:
+                pair_data = self.data_store.get_pair(symbol)
+                if not pair_data:
+                    continue
+                
+                cur.execute("""
+                    SELECT ts, o, h, l, c, v, bv
+                    FROM fas_smart.candles_1m
+                    WHERE pair_id = %s
+                    ORDER BY ts DESC
+                    LIMIT %s
+                """, (pair_data.pair_id, self.WARMUP_CANDLES)) # Changed from MIN_CANDLES_REQUIRED to WARMUP_CANDLES
+                
+                rows = cur.fetchall()
+                for row in reversed(rows):
+                    pair_data.add_candle(
+                        timestamp=row[0],
+                        o=float(row[1]),
+                        h=float(row[2]),
+                        l=float(row[3]),
+                        c=float(row[4]),
+                        volume=float(row[5]),
+                        buy_volume=float(row[6]) if row[6] else float(row[5]) * 0.5
+                    )
+        
+        logger.info(f"Loaded history for {len(symbols)} symbols")
+    
     async def fill_gaps(self):
         """
         Detect last gap in candles_1m and fill via Binance REST API.
