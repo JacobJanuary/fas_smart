@@ -307,6 +307,7 @@ class FASService:
         
         # Apply market regime adjustment (FAS V2 parity)
         btc_data = self.data_store.get_pair('BTCUSDT')
+        regime = None
         if btc_data and btc_data.candle_count >= 17:
             regime = calculate_market_regime(btc_data)
             indicator_score = adjust_score_for_regime(indicator_score, regime)
@@ -376,6 +377,7 @@ class FASService:
                 'volume_zscore': indicators.volume_zscore,
                 'atr': indicators.atr,
             },
+            'market_regime': regime.regime if regime else None,
         }
     
     def _save_signals(self, signals: list[dict]):
@@ -411,14 +413,15 @@ class FASService:
                     cur.execute("""
                         INSERT INTO fas_smart.signals 
                         (pair_id, ts, pattern_score, indicator_score, direction, 
-                         confidence, entry_price, patterns_json, indicators_json)
+                         confidence, market_regime, entry_price, patterns_json, indicators_json)
                         VALUES (%s, %s, %s, %s, %s::fas_smart.signal_direction, 
-                                %s, %s, %s::jsonb, %s::jsonb)
+                                %s, %s::fas_smart.market_regime, %s, %s::jsonb, %s::jsonb)
                         ON CONFLICT (pair_id, ts) DO UPDATE SET
                             pattern_score = EXCLUDED.pattern_score,
                             indicator_score = EXCLUDED.indicator_score,
                             direction = EXCLUDED.direction,
-                            confidence = EXCLUDED.confidence
+                            confidence = EXCLUDED.confidence,
+                            market_regime = EXCLUDED.market_regime
                         RETURNING id
                     """, (
                         signal['trading_pair_id'],
@@ -427,6 +430,7 @@ class FASService:
                         float(indicator_score),
                         signal['direction'],
                         float(signal['confidence']),
+                        signal['market_regime'],
                         float(signal['entry_price']),
                         json.dumps(signal['patterns']),
                         json.dumps(signal['indicators']),
