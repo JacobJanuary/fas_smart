@@ -28,8 +28,8 @@ RETRY_ATTEMPTS = 3
 def get_proxy_url(session_id: Optional[str] = None) -> str:
     """Generate rotating proxy URL with unique session ID."""
     port = random.randint(*DECODO_PORT_RANGE)
-    session_suffix = f"-session-{session_id}" if session_id else ""
-    return f"http://{DECODO_USER}{session_suffix}:{DECODO_PASS}@{DECODO_HOST}:{port}"
+    # Decodo uses simple user:pass format, session rotation via random ports
+    return f"http://{DECODO_USER}:{DECODO_PASS}@{DECODO_HOST}:{port}"
 
 
 async def fetch_klines_with_proxy(
