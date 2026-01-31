@@ -285,6 +285,11 @@ class WarmupManager:
                             logger.debug(f"Rate limited on {gap['symbol']}, waiting {wait_time}s...")
                             await asyncio.sleep(wait_time)
                             continue
+                        if resp.status == 451:
+                            # Geo-blocked proxy - retry with different one
+                            logger.debug(f"Proxy blocked (451) for {gap['symbol']}, trying another...")
+                            await asyncio.sleep(0.5)
+                            continue
                         if resp.status == 502 or resp.status == 503:
                             await asyncio.sleep(1 * (attempt + 1))
                             continue
