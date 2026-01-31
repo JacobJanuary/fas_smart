@@ -388,6 +388,53 @@ class PatternDetector:
         
         return None
     
+    def _detect_funding_extreme_from_rate(self, rate: float) -> Optional[Pattern]:
+        """
+        Detect extreme funding rate directly from a given rate value.
+        Used for HTF pattern detection where funding_rate comes from indicators.
+        Same logic as _detect_funding_extreme but takes rate directly.
+        """
+        # Strong short squeeze (very bullish)
+        if rate < -0.001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=70.0,
+                confidence=90,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'STRONG_SHORT_SQUEEZE',
+                    'direction': 'BULLISH',
+                }
+            )
+        
+        # Moderate short squeeze
+        if rate < -0.0005:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=50.0,
+                confidence=80,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'SHORT_SQUEEZE',
+                    'direction': 'BULLISH',
+                }
+            )
+        
+        # Long squeeze potential (bearish)
+        if rate > 0.001:
+            return Pattern(
+                pattern_type=PatternType.FUNDING_EXTREME,
+                score=-50.0,
+                confidence=80,
+                details={
+                    'funding_rate': rate,
+                    'squeeze_type': 'LONG_SQUEEZE_POTENTIAL',
+                    'direction': 'BEARISH',
+                }
+            )
+        
+        return None
+    
     def _detect_rsi_extreme(self, indicators) -> Optional[Pattern]:
         """Detect RSI at extreme levels"""
         if indicators.rsi is None:
@@ -947,6 +994,12 @@ def detect_htf_patterns(
         p = detector._detect_smart_money_divergence(indicators)
         if p:
             patterns.append(p)
+        
+        # FUNDING_EXTREME - uses indicators.funding_rate from HTF candle (FAS V2 parity)
+        if indicators.funding_rate is not None and indicators.funding_rate != 0:
+            p = detector._detect_funding_extreme_from_rate(indicators.funding_rate)
+            if p:
+                patterns.append(p)
         
         # Add timeframe tag and filter by score >= 10 (FAS V2 rule)
         for p in patterns:

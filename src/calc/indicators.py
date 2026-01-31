@@ -26,6 +26,7 @@ class IndicatorResult:
     prev_cvd_cumulative: Optional[float] = None
     smoothed_imbalance: Optional[float] = None
     oi_delta_pct: Optional[float] = None
+    funding_rate: Optional[float] = None  # HTF funding rate for FUNDING_EXTREME
 
 
 def calculate_ema(values: np.ndarray, period: int) -> np.ndarray:
@@ -514,6 +515,11 @@ def calculate_htf_indicators(pair_data, timeframe: str) -> IndicatorResult:
     buy_volumes = candles['buy_volume']
     highs = candles['high']
     lows = candles['low']
+    funding_rates = candles['funding_rate']
+    
+    # Funding rate from latest HTF candle (FAS V2 parity)
+    if len(funding_rates) > 0 and funding_rates[-1] != 0:
+        result.funding_rate = funding_rates[-1]
     
     # Volume Z-Score (20 periods)
     if len(volumes) >= 20:

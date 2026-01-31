@@ -130,8 +130,13 @@ class PairData:
                 self.smoothed_imbalance = (sma3 + sma6) / 2
     
     def add_htf_candle(self, timeframe: str, timestamp: int, o: float, h: float, 
-                       l: float, c: float, volume: float, buy_volume: float):
-        """Add a candle to higher timeframe buffer (1h, 4h, 1d)"""
+                       l: float, c: float, volume: float, buy_volume: float,
+                       funding_rate: float = 0.0):
+        """Add a candle to higher timeframe buffer (1h, 4h, 1d)
+        
+        Args:
+            funding_rate: Latest funding rate at this candle time (FAS V2 parity)
+        """
         if timeframe == '1h':
             buffer = self.candles_1h
         elif timeframe == '4h':
@@ -142,7 +147,7 @@ class PairData:
             return
         
         idx = self.htf_write_idx.get(timeframe, 0)
-        buffer[idx] = (timestamp, o, h, l, c, volume, buy_volume, 0.0)
+        buffer[idx] = (timestamp, o, h, l, c, volume, buy_volume, funding_rate)
         self.htf_write_idx[timeframe] = (idx + 1) % HTF_BUFFER_SIZE
         self.htf_candle_count[timeframe] = min(
             self.htf_candle_count.get(timeframe, 0) + 1, HTF_BUFFER_SIZE
@@ -315,6 +320,7 @@ class DataStore:
             c=candle.close,
             volume=candle.volume,
             buy_volume=candle.buy_volume,
+            funding_rate=pair_data.latest_funding_rate,  # FAS V2 parity
         )
         return True
     
