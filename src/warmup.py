@@ -260,9 +260,21 @@ class WarmupManager:
                                 if retry < max_retries - 1:
                                     logger.warning(f"⏰ TIMEOUT: {gap['symbol']}, retry {retry + 1}/{max_retries}...")
                                     
-                                    # On 2nd retry, diagnose the issue
+                                    # On 2nd retry, diagnose and take action
                                     if retry == 1:
-                                        await self._diagnose_symbol(session, gap['symbol'])
+                                        action = await self._diagnose_symbol(session, gap['symbol'], gap['pair_id'])
+                                        
+                                        if action == 'RETRY_NO_PROXY':
+                                            # Try without proxy as fallback
+                                            success = await self._fetch_klines_no_proxy(session, gap)
+                                            if success:
+                                                return True
+                                        elif action == 'SKIP_NEW':
+                                            # Newly listed, skip warmup for this symbol
+                                            return None
+                                        elif action == 'DEACTIVATE':
+                                            # Already deactivated, skip
+                                            return None
                                     
                                     await asyncio.sleep(2)
                                 else:
@@ -297,8 +309,16 @@ class WarmupManager:
         
         logger.info(f"Gap filling complete")
     
-    async def _diagnose_symbol(self, session: aiohttp.ClientSession, symbol: str):
-        """Check if symbol is valid/listed on Binance - used for debugging timeouts."""
+    async def _diagnose_symbol(self, session: aiohttp.ClientSession, symbol: str, pair_id: int) -> str:
+        """
+        Check if symbol is valid/listed on Binance and take corrective action.
+        
+        Returns:
+            'RETRY_NO_PROXY' - Symbol valid, try without proxy
+            'SKIP_NEW' - Newly listed, not enough data
+            'DEACTIVATE' - Delisted, mark inactive
+            'RETRY' - Unknown issue, just retry
+        """
         try:
             # Try direct API call without proxy to diagnose
             url = f"{self.BINANCE_KLINES_URL}?symbol={symbol}&interval=1m&limit=1"
@@ -306,17 +326,83 @@ class WarmupManager:
                 if resp.status == 200:
                     data = await resp.json()
                     if data:
-                        logger.info(f"🔍 DIAG {symbol}: Symbol valid, has data (proxy issue?)")
+                        logger.info(f"🔍 DIAG {symbol}: Symbol valid, has data → switching to no-proxy")
+                        return 'RETRY_NO_PROXY'
                     else:
-                        logger.warning(f"🔍 DIAG {symbol}: Symbol valid but NO DATA (newly listed?)")
+                        logger.warning(f"🔍 DIAG {symbol}: Newly listed, no historical data → skipping warmup")
+                        return 'SKIP_NEW'
                 elif resp.status == 400:
                     error = await resp.json()
                     msg = error.get('msg', 'Unknown')
-                    logger.warning(f"🔍 DIAG {symbol}: BAD REQUEST - {msg} (delisted?)")
+                    if 'Invalid symbol' in msg:
+                        logger.warning(f"🔍 DIAG {symbol}: DELISTED → deactivating in DB")
+                        await self._deactivate_pair(pair_id, symbol, reason="delisted")
+                        return 'DEACTIVATE'
+                    else:
+                        logger.warning(f"🔍 DIAG {symbol}: BAD REQUEST - {msg}")
+                        return 'RETRY'
+                elif resp.status == 451:
+                    logger.info(f"🔍 DIAG {symbol}: IP blocked (451) → need VPN/proxy change")
+                    return 'RETRY'
                 else:
                     logger.warning(f"🔍 DIAG {symbol}: HTTP {resp.status}")
+                    return 'RETRY'
         except Exception as e:
             logger.warning(f"🔍 DIAG {symbol}: Cannot reach Binance - {e}")
+            return 'RETRY'
+    
+    async def _deactivate_pair(self, pair_id: int, symbol: str, reason: str):
+        """Mark trading pair as inactive in database."""
+        try:
+            with get_cursor() as cur:
+                cur.execute("""
+                    UPDATE fas_smart.trading_pairs 
+                    SET is_active = false, updated_at = NOW()
+                    WHERE id = %s
+                """, (pair_id,))
+            logger.info(f"🗑️ Deactivated {symbol} (reason: {reason})")
+        except Exception as e:
+            logger.error(f"Failed to deactivate {symbol}: {e}")
+    
+    async def _fetch_klines_no_proxy(self, session: aiohttp.ClientSession, gap: dict) -> bool:
+        """Fetch klines without proxy - fallback for proxy issues."""
+        try:
+            limit = min(gap['gap_minutes'], 1000)
+            url = f"{self.BINANCE_KLINES_URL}?symbol={gap['symbol']}&interval=1m&limit={limit}"
+            
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    klines = await resp.json()
+                    if klines:
+                        inserted = 0
+                        with get_cursor() as cur:
+                            for k in klines:
+                                ts = datetime.utcfromtimestamp(k[0] / 1000)
+                                volume = float(k[5])
+                                taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
+                                
+                                cur.execute("""
+                                    INSERT INTO fas_smart.candles_1m 
+                                    (pair_id, ts, o, h, l, c, v, bv)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (pair_id, ts) DO NOTHING
+                                """, (
+                                    gap['pair_id'], ts,
+                                    float(k[1]), float(k[2]), float(k[3]), float(k[4]),
+                                    volume, taker_buy
+                                ))
+                                inserted += 1
+                        logger.info(f"✅ {gap['symbol']}: filled {inserted} candles (no-proxy fallback)")
+                        return True
+                elif resp.status == 451:
+                    logger.warning(f"🚫 {gap['symbol']}: IP blocked even without proxy")
+                    return False
+                else:
+                    logger.warning(f"❌ {gap['symbol']}: HTTP {resp.status} (no-proxy)")
+                    return False
+        except Exception as e:
+            logger.error(f"❌ {gap['symbol']}: no-proxy fetch failed: {e}")
+            return False
     
     async def fill_htf_gaps(self):
         """
