@@ -61,26 +61,26 @@ class IPv6Config:
 
 
 class ProxyConfig:
-    """Rotating proxy configuration for API rate limit bypass"""
-    # Proxy URL format: user-res-any-sid-{SESSION}:password@host:port
+    """DECODO datacenter proxy configuration for API rate limit bypass"""
+    # DECODO uses port rotation for IP rotation (each port = different IP)
     ENABLED: bool = bool(os.getenv('PROXY_ENABLED', ''))
-    HOST: str = os.getenv('PROXY_HOST', 'proxy-eu.proxy-cheap.com')
-    PORT: int = int(os.getenv('PROXY_PORT', '5959'))
-    USER: str = os.getenv('PROXY_USER', '')  # e.g., pceYcodHcK-res-any
+    HOST: str = os.getenv('PROXY_HOST', 'dc.decodo.com')
+    PORT_MIN: int = int(os.getenv('PROXY_PORT_MIN', '10001'))
+    PORT_MAX: int = int(os.getenv('PROXY_PORT_MAX', '60000'))
+    USER: str = os.getenv('PROXY_USER', '')  # e.g., sppcmd7blj
     PASSWORD: str = os.getenv('PROXY_PASSWORD', '')
     
     @classmethod
     def get_rotating_url(cls, session_id: str = None) -> str:
-        """Get proxy URL with optional session ID for rotation."""
+        """Get proxy URL with random port for IP rotation."""
+        import random
         if not cls.ENABLED or not cls.USER:
             return None
         
-        # Add session ID to username for IP rotation
-        user = cls.USER
-        if session_id:
-            user = f"{cls.USER}-sid-{session_id}"
+        # DECODO: each port gives a different IP
+        port = random.randint(cls.PORT_MIN, cls.PORT_MAX)
         
-        return f"http://{user}:{cls.PASSWORD}@{cls.HOST}:{cls.PORT}"
+        return f"http://{cls.USER}:{cls.PASSWORD}@{cls.HOST}:{port}"
 
 
 class Config:
