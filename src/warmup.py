@@ -62,7 +62,8 @@ class WarmupManager:
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
     MAX_RESTORE_MINUTES = 10080  # 7 days = 7 * 24 * 60
-    PROXY_PARALLEL_REQUESTS = 100  # Parallel requests with proxy rotation
+    PROXY_PARALLEL_REQUESTS = 30  # Reduced to avoid 502 errors
+    PROXY_RETRY_ATTEMPTS = 3
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
     def __init__(self, data_store: DataStore):
@@ -240,65 +241,75 @@ class WarmupManager:
         session: aiohttp.ClientSession, 
         gap: dict
     ):
-        """Fetch klines via rotating proxy - new IP per request."""
-        try:
-            limit = min(gap['gap_minutes'], self.MAX_KLINES_PER_REQUEST)
-            
-            params = {
-                'symbol': gap['symbol'],
-                'interval': '1m',
-                'limit': limit
-            }
-            
-            # Generate unique session ID for IP rotation
-            session_id = f"{gap['symbol']}{random.randint(10000, 99999)}"
-            proxy_url = config.PROXY.get_rotating_url(session_id)
-            
-            async with session.get(
-                self.BINANCE_KLINES_URL, 
-                params=params,
-                proxy=proxy_url,
-                timeout=15
-            ) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Failed to fetch {gap['symbol']}: {resp.status}")
+        """Fetch klines via rotating proxy - new IP per request with retry."""
+        for attempt in range(self.PROXY_RETRY_ATTEMPTS):
+            try:
+                limit = min(gap['gap_minutes'], self.MAX_KLINES_PER_REQUEST)
+                
+                params = {
+                    'symbol': gap['symbol'],
+                    'interval': '1m',
+                    'limit': limit
+                }
+                
+                # Generate unique session ID for IP rotation
+                session_id = f"{gap['symbol']}{random.randint(10000, 99999)}"
+                proxy_url = config.PROXY.get_rotating_url(session_id)
+                
+                async with session.get(
+                    self.BINANCE_KLINES_URL, 
+                    params=params,
+                    proxy=proxy_url,
+                    timeout=aiohttp.ClientTimeout(total=20)
+                ) as resp:
+                    if resp.status == 502 or resp.status == 503:
+                        # Proxy overload - retry with backoff
+                        await asyncio.sleep(1 * (attempt + 1))
+                        continue
+                    if resp.status != 200:
+                        logger.warning(f"Failed to fetch {gap['symbol']}: {resp.status}")
+                        return
+                        
+                    klines = await resp.json()
+                
+                if not klines:
                     return
                     
-                klines = await resp.json()
-            
-            if not klines:
-                return
-                
-            # Insert to DB
-            with get_cursor() as cur:
-                for k in klines:
-                    ts = datetime.utcfromtimestamp(k[0] / 1000)
-                    if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
-                        continue
+                # Insert to DB
+                with get_cursor() as cur:
+                    for k in klines:
+                        ts = datetime.utcfromtimestamp(k[0] / 1000)
+                        if gap['last_ts'] and ts <= gap['last_ts'].replace(tzinfo=None):
+                            continue
+                            
+                        volume = float(k[5])
+                        taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
                         
-                    volume = float(k[5])
-                    taker_buy = float(k[9]) if len(k) > 9 else volume * 0.5
-                    
-                    cur.execute("""
-                        INSERT INTO fas_smart.candles_1m 
-                        (pair_id, ts, o, h, l, c, v, bv)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (pair_id, ts) DO NOTHING
-                    """, (
-                        gap['pair_id'],
-                        ts,
-                        float(k[1]),
-                        float(k[2]),
-                        float(k[3]),
-                        float(k[4]),
-                        volume,
-                        taker_buy
-                    ))
-                    
-            logger.debug(f"Filled {len(klines)} candles for {gap['symbol']} via proxy")
-            
-        except Exception as e:
-            logger.error(f"Error filling gap for {gap['symbol']} with proxy: {e}")
+                        cur.execute("""
+                            INSERT INTO fas_smart.candles_1m 
+                            (pair_id, ts, o, h, l, c, v, bv)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (pair_id, ts) DO NOTHING
+                        """, (
+                            gap['pair_id'],
+                            ts,
+                            float(k[1]),
+                            float(k[2]),
+                            float(k[3]),
+                            float(k[4]),
+                            volume,
+                            taker_buy
+                        ))
+                        
+                logger.debug(f"Filled {len(klines)} candles for {gap['symbol']} via proxy")
+                return  # Success, exit retry loop
+                
+            except Exception as e:
+                if attempt < self.PROXY_RETRY_ATTEMPTS - 1:
+                    await asyncio.sleep(1 * (attempt + 1))
+                else:
+                    logger.error(f"Error filling gap for {gap['symbol']} after {self.PROXY_RETRY_ATTEMPTS} attempts: {e}")
+    
     
     async def _fetch_and_insert_klines_ipv6(self, gap: dict):
         """Fetch klines with IPv6 rotation - new address per request."""
