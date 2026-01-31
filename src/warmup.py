@@ -62,8 +62,8 @@ class WarmupManager:
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
     MAX_RESTORE_MINUTES = 10080  # 7 days = 7 * 24 * 60
-    PROXY_PARALLEL_REQUESTS = 30  # Reduced to avoid 502 errors
-    PROXY_RETRY_ATTEMPTS = 3
+    PROXY_PARALLEL_REQUESTS = 10  # Reduced to avoid Binance 429 rate limits
+    PROXY_RETRY_ATTEMPTS = 5  # More attempts for rate limit recovery
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
     def __init__(self, data_store: DataStore):
@@ -279,6 +279,12 @@ class WarmupManager:
                         proxy=proxy_url,
                         timeout=aiohttp.ClientTimeout(total=30)
                     ) as resp:
+                        if resp.status == 429:
+                            # Rate limited - exponential backoff
+                            wait_time = 2 ** attempt
+                            logger.debug(f"Rate limited on {gap['symbol']}, waiting {wait_time}s...")
+                            await asyncio.sleep(wait_time)
+                            continue
                         if resp.status == 502 or resp.status == 503:
                             await asyncio.sleep(1 * (attempt + 1))
                             continue
