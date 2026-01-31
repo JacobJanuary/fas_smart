@@ -62,7 +62,7 @@ class WarmupManager:
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
     MAX_RESTORE_MINUTES = 10080  # 7 days = 7 * 24 * 60
-    PROXY_PARALLEL_REQUESTS = 100  # DECODO datacenter allows aggressive parallelism
+    PROXY_PARALLEL_REQUESTS = 30  # Residential proxy - moderate parallelism
     PROXY_RETRY_ATTEMPTS = 5  # More attempts for rate limit recovery
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
