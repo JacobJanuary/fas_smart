@@ -128,6 +128,11 @@ class WarmupManager:
                 gap_minutes = (now - row['last_ts'].replace(tzinfo=None)).total_seconds() / 60
             
             if gap_minutes > self.GAP_THRESHOLD_MINUTES:
+                # Skip non-ASCII symbols (Chinese characters break proxy URL encoding)
+                if not row['symbol'].isascii():
+                    logger.debug(f"Skipping non-ASCII symbol: {row['symbol']}")
+                    continue
+                    
                 # Cap at MAX_RESTORE_MINUTES
                 gap_minutes = min(gap_minutes, self.MAX_RESTORE_MINUTES)
                 gaps_to_fill.append({
