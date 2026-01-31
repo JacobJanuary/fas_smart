@@ -380,6 +380,7 @@ class FASService:
             'total_score': total_score,
             'direction': direction,
             'confidence': confidence,
+            'indicator_score': indicator_score,  # Pass actual value for DB storage
             'entry_price': entry_price,
             'patterns': [
                 {
@@ -424,9 +425,9 @@ class FASService:
                     # Convert all numpy types
                     signal = convert_numpy(signal)
                     
-                    # Calculate pattern and indicator scores
+                    # Get pattern and indicator scores
                     pattern_score = sum(p['score'] for p in signal['patterns'])
-                    indicator_score = signal['total_score'] - pattern_score
+                    indicator_score = signal['indicator_score']  # Use actual calculated value
                     
                     # Insert signal (total_score is generated column)
                     cur.execute("""
