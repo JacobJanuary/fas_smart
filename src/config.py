@@ -75,11 +75,11 @@ class ProxyConfig:
     ENABLED: bool = bool(os.getenv('PROXY_ENABLED', ''))
     PROXY_FILE: str = os.path.join(os.path.dirname(__file__), '..', 'proxy.txt')
     
-    # Decodo datacenter proxy (primary)
-    DECODO_ENABLED: bool = True  # Use Decodo by default
-    DECODO_USER: str = "sppcmd7blj"
-    DECODO_PASS: str = "Of_3y7UoigR7syr1kR"
-    DECODO_HOST: str = "dc.decodo.com"
+    # Decodo datacenter proxy (from env)
+    DECODO_ENABLED: bool = bool(os.getenv('DECODO_ENABLED', '1'))  # Enabled by default
+    DECODO_USER: str = os.getenv('DECODO_USER', '')
+    DECODO_PASS: str = os.getenv('DECODO_PASS', '')
+    DECODO_HOST: str = os.getenv('DECODO_HOST', 'dc.decodo.com')
     DECODO_PORT_RANGE: tuple = (10001, 60000)
     
     _proxies: list = None
