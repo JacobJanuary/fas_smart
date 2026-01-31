@@ -259,6 +259,11 @@ class WarmupManager:
                             except asyncio.TimeoutError:
                                 if retry < max_retries - 1:
                                     logger.warning(f"⏰ TIMEOUT: {gap['symbol']}, retry {retry + 1}/{max_retries}...")
+                                    
+                                    # On 2nd retry, diagnose the issue
+                                    if retry == 1:
+                                        await self._diagnose_symbol(session, gap['symbol'])
+                                    
                                     await asyncio.sleep(2)
                                 else:
                                     logger.error(f"⏰ TIMEOUT: {gap['symbol']} failed after {max_retries} retries, skipping")
@@ -291,6 +296,27 @@ class WarmupManager:
                         await asyncio.sleep(2)
         
         logger.info(f"Gap filling complete")
+    
+    async def _diagnose_symbol(self, session: aiohttp.ClientSession, symbol: str):
+        """Check if symbol is valid/listed on Binance - used for debugging timeouts."""
+        try:
+            # Try direct API call without proxy to diagnose
+            url = f"{self.BINANCE_KLINES_URL}?symbol={symbol}&interval=1m&limit=1"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data:
+                        logger.info(f"🔍 DIAG {symbol}: Symbol valid, has data (proxy issue?)")
+                    else:
+                        logger.warning(f"🔍 DIAG {symbol}: Symbol valid but NO DATA (newly listed?)")
+                elif resp.status == 400:
+                    error = await resp.json()
+                    msg = error.get('msg', 'Unknown')
+                    logger.warning(f"🔍 DIAG {symbol}: BAD REQUEST - {msg} (delisted?)")
+                else:
+                    logger.warning(f"🔍 DIAG {symbol}: HTTP {resp.status}")
+        except Exception as e:
+            logger.warning(f"🔍 DIAG {symbol}: Cannot reach Binance - {e}")
     
     async def fill_htf_gaps(self):
         """
