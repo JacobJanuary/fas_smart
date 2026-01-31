@@ -64,19 +64,38 @@ def setup_logging(debug: bool = False):
 
 
 async def run_with_timeout(service: FASService, duration: int = 0):
-    """Run service with optional timeout"""
+    """Run service with optional timeout and graceful shutdown"""
+    shutdown_event = asyncio.Event()
+    
+    def request_shutdown():
+        logging.info("Shutdown requested, stopping gracefully (max 5s)...")
+        shutdown_event.set()
+    
+    # Register shutdown callback
+    loop = asyncio.get_event_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        loop.add_signal_handler(sig, request_shutdown)
+    
     try:
         await service.start()
         
         if duration > 0:
             logging.info(f"Running for {duration} seconds...")
-            await asyncio.sleep(duration)
+            try:
+                await asyncio.wait_for(shutdown_event.wait(), timeout=duration)
+            except asyncio.TimeoutError:
+                pass  # Normal timeout exit
         else:
-            # Run forever
-            while True:
-                await asyncio.sleep(60)
+            # Run until shutdown signal
+            await shutdown_event.wait()
     finally:
-        await service.stop()
+        # Graceful shutdown with timeout
+        try:
+            await asyncio.wait_for(service.stop(), timeout=5.0)
+        except asyncio.TimeoutError:
+            logging.warning("Shutdown timed out, forcing exit")
+        except Exception as e:
+            logging.error(f"Error during shutdown: {e}")
 
 
 def main():
@@ -99,24 +118,13 @@ def main():
     # Create service
     service = FASService()
     
-    # Handle signals
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    def handle_signal(sig):
-        logger.info(f"Received signal {sig.name}, shutting down...")
-        loop.create_task(service.stop())
-    
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, lambda s=sig: handle_signal(s))
-    
+    # Run with asyncio
     try:
-        loop.run_until_complete(run_with_timeout(service, args.duration))
+        asyncio.run(run_with_timeout(service, args.duration))
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
-    finally:
-        loop.close()
-        logger.info("Service shutdown complete")
+    
+    logger.info("Service shutdown complete")
 
 
 if __name__ == "__main__":
