@@ -71,11 +71,20 @@ class IPv6Config:
 
 
 class ProxyConfig:
-    """Proxy list configuration - loads from proxy.txt file"""
+    """Proxy configuration - Decodo as primary, proxy.txt as fallback"""
     ENABLED: bool = bool(os.getenv('PROXY_ENABLED', ''))
     PROXY_FILE: str = os.path.join(os.path.dirname(__file__), '..', 'proxy.txt')
     
+    # Decodo datacenter proxy (primary)
+    DECODO_ENABLED: bool = True  # Use Decodo by default
+    DECODO_USER: str = "sppcmd7blj"
+    DECODO_PASS: str = "Of_3y7UoigR7syr1kR"
+    DECODO_HOST: str = "dc.decodo.com"
+    DECODO_PORT_RANGE: tuple = (10001, 60000)
+    
     _proxies: list = None
+    _decodo_failures: int = 0
+    _decodo_disabled: bool = False
     
     @classmethod
     def _load_proxies(cls) -> list:
@@ -89,7 +98,6 @@ class ProxyConfig:
             with open(proxy_path, 'r') as f:
                 for line in f:
                     line = line.strip()
-                    # Skip comments and empty lines
                     if line and not line.startswith('#'):
                         cls._proxies.append(line)
             print(f"Loaded {len(cls._proxies)} proxies from {proxy_path}")
@@ -99,20 +107,36 @@ class ProxyConfig:
     
     @classmethod
     def get_rotating_url(cls, session_id: str = None) -> str:
-        """Get random proxy URL from list."""
+        """Get proxy URL - Decodo primary, proxy.txt fallback."""
         import random
         if not cls.ENABLED:
             return None
         
+        # Try Decodo first (unless disabled due to failures)
+        if cls.DECODO_ENABLED and not cls._decodo_disabled:
+            port = random.randint(*cls.DECODO_PORT_RANGE)
+            return f"http://{cls.DECODO_USER}:{cls.DECODO_PASS}@{cls.DECODO_HOST}:{port}"
+        
+        # Fallback to proxy.txt list
         proxies = cls._load_proxies()
         if not proxies:
             return None
         
-        # Random proxy from list
         proxy = random.choice(proxies)
-        
-        # Format: ip:port -> http://ip:port
         return f"http://{proxy}"
+    
+    @classmethod
+    def report_decodo_failure(cls):
+        """Report Decodo failure - disable after 5 consecutive failures."""
+        cls._decodo_failures += 1
+        if cls._decodo_failures >= 5:
+            cls._decodo_disabled = True
+            print("⚠️ Decodo disabled after 5 failures, falling back to proxy.txt")
+    
+    @classmethod
+    def report_decodo_success(cls):
+        """Reset Decodo failure counter on success."""
+        cls._decodo_failures = 0
 
 
 class Config:

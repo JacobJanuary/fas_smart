@@ -254,6 +254,7 @@ class WarmupManager:
                         await asyncio.sleep(2 ** attempt)
                         continue
                     if resp.status == 200:
+                        config.PROXY.report_decodo_success()
                         klines = await resp.json()
                         pair_data = self.data_store.get_pair(symbol)
                         if pair_data and klines:
@@ -271,6 +272,7 @@ class WarmupManager:
                             logger.debug(f"Loaded {len(klines)} {interval} candles for {symbol}")
                         return
             except Exception as e:
+                config.PROXY.report_decodo_failure()
                 if attempt == self.PROXY_RETRY_ATTEMPTS - 1:
                     logger.warning(f"Failed to fetch {interval} candles for {symbol}: {e}")
                 await asyncio.sleep(1)
@@ -391,6 +393,7 @@ class WarmupManager:
                             return
                             
                         klines = await resp.json()
+                        config.PROXY.report_decodo_success()
                     
                     if not klines:
                         success = True
@@ -434,6 +437,7 @@ class WarmupManager:
                     break
                     
                 except Exception as e:
+                    config.PROXY.report_decodo_failure()
                     if attempt < self.PROXY_RETRY_ATTEMPTS - 1:
                         await asyncio.sleep(1 * (attempt + 1))
                     else:
