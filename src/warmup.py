@@ -422,14 +422,16 @@ class WarmupManager:
                 continue
                 
             # Add candle to memory (using short column names from schema)
+            bv = candle['bv']
+            v = float(candle['v'])
             pair_data.add_candle(
                 timestamp=int(candle['ts'].timestamp() * 1000),
                 o=float(candle['o']),
                 h=float(candle['h']),
                 l=float(candle['l']),
                 c=float(candle['c']),
-                volume=float(candle['v']),
-                buy_volume=float(candle['bv'] or candle['v'] * 0.5)
+                volume=v,
+                buy_volume=float(bv) if bv else v * 0.5
             )
             
             # Restore funding rate if available

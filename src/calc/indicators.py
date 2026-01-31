@@ -20,6 +20,7 @@ class IndicatorResult:
     volume_zscore: Optional[float] = None
     price_change_pct: Optional[float] = None
     normalized_imbalance: Optional[float] = None
+    atr: Optional[float] = None  # Average True Range
     # New fields for FAS V2 parity
     cvd_cumulative: Optional[float] = None
     prev_cvd_cumulative: Optional[float] = None
@@ -197,14 +198,46 @@ def calculate_price_change(
 
 
 
-def calculate_normalized_imbalance(volume: float, buy_volume: float) -> Optional[float]:
+def calculate_normalized_imbalance(volume: float, buy_volume: float) -> float:
     """
     Calculate normalized imbalance: (2*buy - total) / total
     Range: -1 (all sells) to +1 (all buys)
     """
-    if volume == 0:
+    if volume <= 0:
         return 0.0
     return (2 * buy_volume - volume) / volume
+
+
+def calculate_atr(highs: np.ndarray, lows: np.ndarray, closes: np.ndarray, period: int = 14) -> Optional[float]:
+    """
+    Calculate Average True Range (ATR).
+    
+    Args:
+        highs: Array of high prices
+        lows: Array of low prices
+        closes: Array of close prices
+        period: ATR period (default 14)
+    
+    Returns:
+        ATR value or None if not enough data
+    """
+    if len(highs) < period + 1:
+        return None
+    
+    # True Range calculation
+    tr_values = []
+    for i in range(1, len(highs)):
+        high_low = highs[i] - lows[i]
+        high_close = abs(highs[i] - closes[i-1])
+        low_close = abs(lows[i] - closes[i-1])
+        tr = max(high_low, high_close, low_close)
+        tr_values.append(tr)
+    
+    if len(tr_values) < period:
+        return None
+    
+    # Simple average for ATR
+    return float(np.mean(tr_values[-period:]))
 
 
 def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
@@ -269,6 +302,12 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
     volumes = pair_data.get_volumes(20)
     if len(volumes) >= 20:
         result.volume_zscore = calculate_volume_zscore(volumes)
+    
+    # ATR calculation
+    if hasattr(pair_data, 'get_high_low_close'):
+        highs, lows, closes_hlc = pair_data.get_high_low_close(20)
+        if len(highs) >= 15:
+            result.atr = calculate_atr(highs, lows, closes_hlc)
     
     return result
 

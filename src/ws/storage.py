@@ -162,6 +162,15 @@ class PairData:
         """Get array of volumes for the last N candles"""
         candles = self.get_last_n_candles(n)
         return candles['volume'].astype(np.float64)
+    
+    def get_high_low_close(self, n: int) -> tuple:
+        """Get arrays of high, low, close prices for the last N candles"""
+        candles = self.get_last_n_candles(n)
+        return (
+            candles['high'].astype(np.float64),
+            candles['low'].astype(np.float64),
+            candles['close'].astype(np.float64)
+        )
 
 
 class DataStore:
