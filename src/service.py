@@ -389,7 +389,7 @@ class FASService:
                     'confidence': p.confidence,
                     'details': p.details,
                 }
-                for p in patterns
+                for p in (patterns + htf_patterns)  # Include both 15m and HTF patterns
             ],
             'indicators': {
                 'rsi': indicators.rsi,
