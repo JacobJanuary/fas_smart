@@ -126,15 +126,23 @@ async def run_parallel_test():
     success = sum(1 for r in results if r["success"])
     failed = len(results) - success
     avg_latency = sum(r["latency_ms"] for r in results) / len(results)
+    total_candles = sum(r["candles"] for r in results)
     
     print("\n" + "="*60)
     print("📊 RESULTS")
     print("="*60)
     print(f"✅ Success: {success}/{len(results)}")
     print(f"❌ Failed: {failed}/{len(results)}")
+    print(f"📈 Total Candles: {total_candles}")
     print(f"⏱️ Avg Latency: {avg_latency:.0f}ms")
     print(f"⏱️ Total Time: {total_time:.2f}s")
     print(f"📈 Throughput: {len(results)/total_time:.1f} req/s")
+    
+    # Show successful requests with data
+    if success > 0:
+        print("\n✅ Data received:")
+        for r in [x for x in results if x["success"]][:5]:
+            print(f"   {r['symbol']}: {r['candles']} candles ({r['latency_ms']}ms)")
     
     # Show errors
     errors = [r for r in results if not r["success"]]
