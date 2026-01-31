@@ -206,7 +206,7 @@ class WarmupManager:
                     
                     cur.execute("""
                         INSERT INTO fas_smart.candles_1m 
-                        (pair_id, ts, open, high, low, close, volume, buy_volume)
+                        (pair_id, ts, o, h, l, c, v, bv)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pair_id, ts) DO NOTHING
                     """, (
@@ -271,7 +271,7 @@ class WarmupManager:
                     
                     cur.execute("""
                         INSERT INTO fas_smart.candles_1m 
-                        (pair_id, ts, open, high, low, close, volume, buy_volume)
+                        (pair_id, ts, o, h, l, c, v, bv)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pair_id, ts) DO NOTHING
                     """, (
@@ -333,7 +333,7 @@ class WarmupManager:
                     
                     cur.execute("""
                         INSERT INTO fas_smart.candles_1m 
-                        (pair_id, ts, open, high, low, close, volume, buy_volume)
+                        (pair_id, ts, o, h, l, c, v, bv)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (pair_id, ts) DO NOTHING
                     """, (
@@ -360,12 +360,13 @@ class WarmupManager:
         logger.info("Loading history from DB to memory...")
         
         # Load last N candles per pair
+        # Note: Schema uses short column names: o, h, l, c, v, bv, fr
         with get_cursor(dict_cursor=True) as cur:
             cur.execute(f"""
                 WITH ranked AS (
                     SELECT 
-                        c.pair_id, c.ts, c.open, c.high, c.low, c.close,
-                        c.volume, c.buy_volume, c.funding_rate,
+                        c.pair_id, c.ts, c.o, c.h, c.l, c.c,
+                        c.v, c.bv, c.fr,
                         ROW_NUMBER() OVER (
                             PARTITION BY c.pair_id 
                             ORDER BY c.ts DESC
@@ -399,20 +400,20 @@ class WarmupManager:
             if not pair_data:
                 continue
                 
-            # Add candle to memory
+            # Add candle to memory (using short column names from schema)
             pair_data.add_candle(
                 timestamp=int(candle['ts'].timestamp() * 1000),
-                o=float(candle['open']),
-                h=float(candle['high']),
-                l=float(candle['low']),
-                c=float(candle['close']),
-                volume=float(candle['volume']),
-                buy_volume=float(candle['buy_volume'] or candle['volume'] * 0.5)
+                o=float(candle['o']),
+                h=float(candle['h']),
+                l=float(candle['l']),
+                c=float(candle['c']),
+                volume=float(candle['v']),
+                buy_volume=float(candle['bv'] or candle['v'] * 0.5)
             )
             
             # Restore funding rate if available
-            if candle['funding_rate']:
-                pair_data.latest_funding_rate = float(candle['funding_rate'])
+            if candle['fr']:
+                pair_data.latest_funding_rate = float(candle['fr'])
                 
             loaded_candles += 1
         
