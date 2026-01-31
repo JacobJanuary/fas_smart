@@ -530,7 +530,9 @@ class WarmupManager:
                 break
         
         if total_inserted > 0:
-            logger.debug(f"Filled {total_inserted} candles for {gap['symbol']} in {batch_num} batches")
+            logger.info(f"✅ {gap['symbol']}: filled {total_inserted} candles in {batch_num} batches")
+        else:
+            logger.warning(f"⚠️ {gap['symbol']}: no candles inserted (gap: {gap['gap_minutes']} min)")
     
     
     
