@@ -61,8 +61,9 @@ class WarmupManager:
     BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
-    MAX_RESTORE_MINUTES = 10080  # 7 days = 7 * 24 * 60
-    PROXY_PARALLEL_REQUESTS = 30  # Residential proxy - moderate parallelism
+    MAX_RESTORE_HOURS = int(os.getenv('RESTORE_HOURS', '168'))  # Default 7 days (168 hours)
+    MAX_RESTORE_MINUTES = MAX_RESTORE_HOURS * 60
+    PROXY_PARALLEL_REQUESTS = int(os.getenv('PROXY_PARALLEL', '30'))
     PROXY_RETRY_ATTEMPTS = 5  # More attempts for rate limit recovery
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
