@@ -126,6 +126,20 @@ class ProxyConfig:
         return f"http://{proxy}"
     
     @classmethod
+    def get_fallback_proxy_url(cls) -> str:
+        """Get proxy URL from proxy.txt only (skip Decodo)."""
+        import random
+        if not cls.ENABLED:
+            return None
+        
+        proxies = cls._load_proxies()
+        if not proxies:
+            return None
+        
+        proxy = random.choice(proxies)
+        return f"http://{proxy}"
+    
+    @classmethod
     def report_decodo_failure(cls):
         """Report Decodo failure - disable after 5 consecutive failures."""
         cls._decodo_failures += 1

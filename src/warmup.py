@@ -370,16 +370,14 @@ class WarmupManager:
     async def _fetch_klines_fallback_proxy(self, session: aiohttp.ClientSession, gap: dict) -> bool:
         """Fetch klines using fallback proxy from proxy.txt (not Decodo)."""
         try:
-            # Force fallback to proxy.txt
-            config.PROXY._decodo_disabled = True  # Temporarily disable Decodo
-            
             limit = min(gap['gap_minutes'], 1000)
             params = {
                 'symbol': gap['symbol'],
                 'interval': '1m',
                 'limit': limit
             }
-            proxy_url = config.PROXY.get_rotating_url()
+            # Use dedicated fallback method - only affects THIS request
+            proxy_url = config.PROXY.get_fallback_proxy_url()
             
             async with session.get(
                 self.BINANCE_KLINES_URL, 
@@ -416,8 +414,6 @@ class WarmupManager:
         except Exception as e:
             logger.error(f"❌ {gap['symbol']}: fallback proxy failed: {e}")
             return False
-        finally:
-            config.PROXY._decodo_disabled = False  # Re-enable Decodo
     
     async def _fetch_klines_available(self, session: aiohttp.ClientSession, gap: dict) -> bool:
         """Fetch whatever klines are available for newly listed symbol."""
