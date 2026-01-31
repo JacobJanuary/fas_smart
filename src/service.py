@@ -113,7 +113,7 @@ class FASService:
             if success:
                 # Get stats for the announcement
                 total_pairs = len(self.data_store.pairs)
-                pairs_with_data = sum(1 for p in self.data_store.pairs.values() if len(p.candles_1m) > 0)
+                pairs_with_data = sum(1 for p in self.data_store.pairs.values() if p.candle_count > 0)
                 logger.info("")
                 logger.info("=" * 60)
                 logger.info("🚀 WARMUP COMPLETE - SIGNAL GENERATION STARTING!")
