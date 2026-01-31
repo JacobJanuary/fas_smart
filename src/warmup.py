@@ -61,6 +61,8 @@ class WarmupManager:
     BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines"
     MAX_KLINES_PER_REQUEST = 1000
     GAP_THRESHOLD_MINUTES = 1  # Detect gaps >= 1 minute
+    MAX_RESTORE_MINUTES = 10080  # 7 days = 7 * 24 * 60
+    PROXY_PARALLEL_REQUESTS = 100  # Parallel requests with proxy rotation
     WARMUP_CANDLES = 100  # Load last 100 candles for indicators
     
     def __init__(self, data_store: DataStore):
@@ -97,14 +99,14 @@ class WarmupManager:
         """
         logger.info("Checking for gaps in candles_1m...")
         
-        # Get last candle timestamp per pair
+        # Get last candle timestamp per pair (check within restore window)
         with get_cursor(dict_cursor=True) as cur:
-            cur.execute("""
+            cur.execute(f"""
                 SELECT tp.id as pair_id, tp.symbol, 
                        MAX(c.ts) as last_ts
                 FROM fas_smart.trading_pairs tp
                 LEFT JOIN fas_smart.candles_1m c ON tp.id = c.pair_id 
-                    AND c.ts > NOW() - INTERVAL '2 hours'
+                    AND c.ts > NOW() - INTERVAL '{self.MAX_RESTORE_MINUTES} minutes'
                 GROUP BY tp.id, tp.symbol
                 ORDER BY tp.symbol
             """)
@@ -119,12 +121,14 @@ class WarmupManager:
         
         for row in pairs_status:
             if row['last_ts'] is None:
-                # No recent data at all - need full warmup
-                gap_minutes = 120  # Assume 2 hour gap
+                # No recent data at all - full restore up to MAX_RESTORE_MINUTES
+                gap_minutes = self.MAX_RESTORE_MINUTES
             else:
                 gap_minutes = (now - row['last_ts'].replace(tzinfo=None)).total_seconds() / 60
             
             if gap_minutes > self.GAP_THRESHOLD_MINUTES:
+                # Cap at MAX_RESTORE_MINUTES
+                gap_minutes = min(gap_minutes, self.MAX_RESTORE_MINUTES)
                 gaps_to_fill.append({
                     'pair_id': row['pair_id'],
                     'symbol': row['symbol'],
@@ -140,11 +144,17 @@ class WarmupManager:
         
         # Fill gaps via Binance API with rotation
         if config.PROXY.ENABLED:
-            logger.info("Proxy rotation enabled, using rotating IPs per request")
-            # With proxy rotation - each request gets unique session ID = new IP
+            logger.info(f"Proxy rotation enabled, using {self.PROXY_PARALLEL_REQUESTS} parallel requests")
+            # With proxy rotation - parallel requests with unique session IDs
             async with aiohttp.ClientSession() as session:
-                for gap in gaps_to_fill:
-                    await self._fetch_and_insert_klines_proxy(session, gap)
+                for i in range(0, len(gaps_to_fill), self.PROXY_PARALLEL_REQUESTS):
+                    chunk = gaps_to_fill[i:i + self.PROXY_PARALLEL_REQUESTS]
+                    tasks = [
+                        self._fetch_and_insert_klines_proxy(session, gap)
+                        for gap in chunk
+                    ]
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                    logger.info(f"Processed {min(i + self.PROXY_PARALLEL_REQUESTS, len(gaps_to_fill))}/{len(gaps_to_fill)} pairs")
         elif config.IPV6.ENABLED:
             logger.info("IPv6 rotation enabled, using random addresses per request")
             for gap in gaps_to_fill:
