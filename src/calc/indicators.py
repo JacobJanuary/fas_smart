@@ -299,8 +299,8 @@ def calculate_all_indicators(pair_data, window: int = 15) -> IndicatorResult:
         result.macd_signal = signal
         result.macd_histogram = hist
     
-    # Volume Z-Score
-    volumes = pair_data.get_volumes(20)
+    # Volume Z-Score (uses 15m aggregated volumes like FAS V2)
+    volumes = pair_data.get_volumes_15m(20)
     if len(volumes) >= 20:
         result.volume_zscore = calculate_volume_zscore(volumes)
     

@@ -225,9 +225,42 @@ class PairData:
         return candles['close'].astype(np.float64)
     
     def get_volumes(self, n: int) -> np.ndarray:
-        """Get array of volumes for the last N candles"""
+        """Get array of volumes for the last N candles (1m)"""
         candles = self.get_last_n_candles(n)
         return candles['volume'].astype(np.float64)
+    
+    def get_volumes_15m(self, n_periods: int = 20) -> np.ndarray:
+        """
+        Get array of 15m aggregated volumes for the last N periods.
+        Each period sums 15 × 1m candles.
+        This matches FAS V2's volume_zscore calculation which uses 15m timeframe.
+        
+        Args:
+            n_periods: Number of 15m periods to return (default 20 for z-score)
+        
+        Returns:
+            Array of 15m aggregated volumes, oldest first
+        """
+        # Need n_periods * 15 candles to create n_periods of 15m volumes
+        candles_needed = n_periods * 15
+        candles = self.get_last_n_candles(candles_needed)
+        
+        if len(candles) < 15:
+            return np.array([])
+        
+        # Calculate how many complete 15m periods we have
+        complete_periods = len(candles) // 15
+        if complete_periods == 0:
+            return np.array([])
+        
+        # Trim to complete periods
+        candles = candles[-(complete_periods * 15):]
+        
+        # Reshape and sum volumes for each 15m period
+        volumes_1m = candles['volume'].astype(np.float64)
+        volumes_15m = volumes_1m.reshape(-1, 15).sum(axis=1)
+        
+        return volumes_15m
     
     def get_high_low_close(self, n: int) -> tuple:
         """Get arrays of high, low, close prices for the last N candles"""
